@@ -213,7 +213,7 @@ class Bot:
             order = sample.pre_order
             if e.jam:
                 jf = self.model.freq(e.player, e.sit, "jam", n)
-                narrow(w, order, 0, jf, 1, 0.15 * jf)
+                narrow(w, order, 0, jf, 1, 0.15 * jf, 0.13)
             elif e.act == "raise":
                 fr = f("raise")
                 # shown hands put only one re-raise in twelve outside the range its frequency implies

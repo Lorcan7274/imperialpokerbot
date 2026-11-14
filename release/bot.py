@@ -940,9 +940,9 @@ PRIORS = {
     ("vs_raise", "fold"): (0.50, 0.75),
     ("vs_raise", "call"): (0.38, 0.18),
     ("vs_raise", "raise"): (0.12, 0.07),
-    ("vs_3bet", "fold"): (0.55, 0.60),
-    ("vs_3bet", "call"): (0.30, 0.27),
-    ("vs_3bet", "raise"): (0.15, 0.13),
+    ("vs_3bet", "fold"): (0.55, 0.83),
+    ("vs_3bet", "call"): (0.30, 0.10),
+    ("vs_3bet", "raise"): (0.15, 0.07),
     ("p_no_bet", "raise"): (0.30, 0.25),
     ("p_no_bet:a", "raise"): (0.55, 0.55),
     ("p_vs_bet", "fold"): (0.42, 0.45),
@@ -954,7 +954,7 @@ PRIORS = {
     ("jam", "jam"): (0.03, 0.02),
     ("unopened", "jam"): (0.012, 0.012),
     ("vs_raise", "jam"): (0.02, 0.02),
-    ("vs_3bet", "jam"): (0.08, 0.08),
+    ("vs_3bet", "jam"): (0.08, 0.06),
     ("re_raised", "jam"): (0.08, 0.08),
     ("vs_hero", "raise"): (0.12, 0.06),
     ("re_raised", "fold"): (0.70, 0.70),
@@ -1252,7 +1252,7 @@ def _cut(xs, cums, total, bound, above):
     return lo
 
 
-def narrow(w, order, lo, hi, inner, floor):
+def narrow(w, order, lo, hi, inner, floor, rare=0.0):
     xs = [w[i] for i in order]
     cums = list(accumulate(xs))
     total = cums[-1] if cums else 0.0
@@ -1261,6 +1261,10 @@ def narrow(w, order, lo, hi, inner, floor):
     # shares of the range are cumulative, so each band is a prefix or a suffix of the order
     p = _cut(xs, cums, total, lo, False)
     q = max(p, _cut(xs, cums, total, hi, True))
+    if not q and rare and 0 < xs[0] < total:
+        # a share smaller than one sampled hand would keep nothing: the best hand stays, the rest share `rare`
+        q = 1
+        floor = min(1.0, rare * xs[0] / ((1 - rare) * (total - xs[0])))
     if inner != 1:
         for i, x in zip(order[:p], xs):
             w[i] = x * inner
@@ -1658,7 +1662,7 @@ class Bot:
             order = sample.pre_order
             if e.jam:
                 jf = self.model.freq(e.player, e.sit, "jam", n)
-                narrow(w, order, 0, jf, 1, 0.15 * jf)
+                narrow(w, order, 0, jf, 1, 0.15 * jf, 0.13)
             elif e.act == "raise":
                 fr = f("raise")
                 # shown hands put only one re-raise in twelve outside the range its frequency implies
@@ -1863,9 +1867,12 @@ class Bot:
                 if not sim or (len(sim) < 12 and self._late() and not any(roles.values())):
                     return self._quick(s)
                 eq = sim_equity(sim)
+            if eq > 0.62:
+                return Action("raise", s.max_raise_to)
+            # a call that leaves chips behind has to be played out of the hand's weak spots after the flop
+            if s.to_call < 0.8 * s.my_stack:
+                eq *= 0.8
             if eq * (s.pot + s.to_call) - s.to_call > 0.04 * s.pot:
-                if eq > 0.62:
-                    return Action("raise", s.max_raise_to)
                 return Action("call")
             return Action("fold")
 

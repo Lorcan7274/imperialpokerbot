@@ -1252,7 +1252,7 @@ def _cut(xs, cums, total, bound, above):
     return lo
 
 
-def narrow(w, order, lo, hi, inner, floor):
+def narrow(w, order, lo, hi, inner, floor, rare=0.0):
     xs = [w[i] for i in order]
     cums = list(accumulate(xs))
     total = cums[-1] if cums else 0.0
@@ -1261,6 +1261,10 @@ def narrow(w, order, lo, hi, inner, floor):
     # shares of the range are cumulative, so each band is a prefix or a suffix of the order
     p = _cut(xs, cums, total, lo, False)
     q = max(p, _cut(xs, cums, total, hi, True))
+    if not q and rare and 0 < xs[0] < total:
+        # a share smaller than one sampled hand would keep nothing: the best hand stays, the rest share `rare`
+        q = 1
+        floor = min(1.0, rare * xs[0] / ((1 - rare) * (total - xs[0])))
     if inner != 1:
         for i, x in zip(order[:p], xs):
             w[i] = x * inner
@@ -1658,7 +1662,7 @@ class Bot:
             order = sample.pre_order
             if e.jam:
                 jf = self.model.freq(e.player, e.sit, "jam", n)
-                narrow(w, order, 0, jf, 1, 0.15 * jf)
+                narrow(w, order, 0, jf, 1, 0.15 * jf, 0.13)
             elif e.act == "raise":
                 fr = f("raise")
                 # shown hands put only one re-raise in twelve outside the range its frequency implies
