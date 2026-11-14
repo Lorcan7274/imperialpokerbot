@@ -940,9 +940,9 @@ PRIORS = {
     ("vs_raise", "fold"): (0.50, 0.75),
     ("vs_raise", "call"): (0.38, 0.18),
     ("vs_raise", "raise"): (0.12, 0.07),
-    ("vs_3bet", "fold"): (0.55, 0.60),
-    ("vs_3bet", "call"): (0.30, 0.27),
-    ("vs_3bet", "raise"): (0.15, 0.13),
+    ("vs_3bet", "fold"): (0.55, 0.83),
+    ("vs_3bet", "call"): (0.30, 0.10),
+    ("vs_3bet", "raise"): (0.15, 0.07),
     ("p_no_bet", "raise"): (0.30, 0.25),
     ("p_no_bet:a", "raise"): (0.55, 0.55),
     ("p_vs_bet", "fold"): (0.42, 0.45),
@@ -954,7 +954,7 @@ PRIORS = {
     ("jam", "jam"): (0.03, 0.02),
     ("unopened", "jam"): (0.012, 0.012),
     ("vs_raise", "jam"): (0.02, 0.02),
-    ("vs_3bet", "jam"): (0.08, 0.08),
+    ("vs_3bet", "jam"): (0.08, 0.06),
     ("re_raised", "jam"): (0.08, 0.08),
     ("vs_hero", "raise"): (0.12, 0.06),
     ("re_raised", "fold"): (0.70, 0.70),
@@ -1863,9 +1863,12 @@ class Bot:
                 if not sim or (len(sim) < 12 and self._late() and not any(roles.values())):
                     return self._quick(s)
                 eq = sim_equity(sim)
+            if eq > 0.62:
+                return Action("raise", s.max_raise_to)
+            # a call that leaves chips behind has to be played out of the hand's weak spots after the flop
+            if s.to_call < 0.8 * s.my_stack:
+                eq *= 0.8
             if eq * (s.pot + s.to_call) - s.to_call > 0.04 * s.pot:
-                if eq > 0.62:
-                    return Action("raise", s.max_raise_to)
                 return Action("call")
             return Action("fold")
 

@@ -418,9 +418,12 @@ class Bot:
                 if not sim or (len(sim) < 12 and self._late() and not any(roles.values())):
                     return self._quick(s)
                 eq = sim_equity(sim)
+            if eq > 0.62:
+                return Action("raise", s.max_raise_to)
+            # a call that leaves chips behind has to be played out of the hand's weak spots after the flop
+            if s.to_call < 0.8 * s.my_stack:
+                eq *= 0.8
             if eq * (s.pot + s.to_call) - s.to_call > 0.04 * s.pot:
-                if eq > 0.62:
-                    return Action("raise", s.max_raise_to)
                 return Action("call")
             return Action("fold")
 
