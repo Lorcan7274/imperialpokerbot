@@ -1,0 +1,216 @@
+diff --git a/arena/fuzz.py b/arena/fuzz.py
+index 73658f5..bcd7bf8 100644
+--- a/arena/fuzz.py
++++ b/arena/fuzz.py
+@@ -196,9 +196,15 @@ def pct(xs, q):
+     return xs[min(len(xs) - 1, int(q * len(xs)))]
+ 
+ 
++def fill(field, players):
++    # a field shorter than the table is repeated, so a table of any size is full
++    names = field.split(",")
++    return [names[i % len(names)] for i in range(players - 1)]
++
++
+ def run(mod, probe, field, players, betting, cap, hands, seed):
+     rng = random.Random(seed)
+-    names = field.split(",")[:players - 1]
++    names = fill(field, players)
+     seats = [Copy(mod) if k == "self" else ZOO[k](seed=rng.random()) for k in names]
+     hero = Hero(mod, probe, seed=seed)
+     seats.insert(rng.randrange(players), hero)
+diff --git a/arena/live.py b/arena/live.py
+index 011dc0f..ccb4f84 100644
+--- a/arena/live.py
++++ b/arena/live.py
+@@ -5,7 +5,7 @@ import time
+ 
+ sys.path.insert(0, ".")
+ from arena.faithful import Table
+-from arena.fuzz import FIELDS, pct
++from arena.fuzz import FIELDS, fill, pct
+ from arena.proc import ProcSeat
+ from arena.zoo import ZOO
+ 
+@@ -26,7 +26,7 @@ def main():
+     a = ap.parse_args()
+     for r in range(a.rounds):
+         rng = random.Random(a.seed + r)
+-        seats = [ZOO[k](seed=rng.random()) for k in FIELDS[a.field].split(",")[:a.players - 1]]
++        seats = [ZOO[k](seed=rng.random()) for k in fill(FIELDS[a.field], a.players)]
+         hero = ProcSeat(a.bot, python=a.python, timeout_ms=a.timeout, bank_ms=a.bank * 1000,
+                         timing=True)
+         seats.insert(rng.randrange(a.players), hero)
+diff --git a/arena/timing.py b/arena/timing.py
+index 12d8673..57f42d4 100644
+--- a/arena/timing.py
++++ b/arena/timing.py
+@@ -6,7 +6,7 @@ import time
+ 
+ sys.path.insert(0, ".")
+ from arena.faithful import Table, normalise
+-from arena.fuzz import FIELDS, load, pct
++from arena.fuzz import FIELDS, fill, load, pct
+ from arena.zoo import ZOO
+ 
+ 
+@@ -72,7 +72,7 @@ class Copy:
+ 
+ def once(mod, field, players, betting, cap, hands, seed, clock):
+     rng = random.Random(seed)
+-    names = field.split(",")[:players - 1]
++    names = fill(field, players)
+     seats = [Copy(mod, rng.random()) if k == "self" else ZOO[k](seed=rng.random()) for k in names]
+     hero = Timed(mod, seed, clock)
+     seats.insert(rng.randrange(players), hero)
+diff --git a/pokerbot/agent.py b/pokerbot/agent.py
+index 7ddabd5..ff41073 100644
+--- a/pokerbot/agent.py
++++ b/pokerbot/agent.py
+@@ -71,9 +71,9 @@ def workload():
+ class Agent:
+     BANK = 8.0
+     OVERHEAD = 0.0018
+-    LIMIT = 0.004
+-    REFERENCE = 0.0003
+-    TARGET = 0.002
++    LIMIT = 0.008
++    REFERENCE = 0.0012
++    TARGET = 0.004
+     CALIBRATE = True
+     REPORT = False
+ 
+@@ -83,13 +83,18 @@ class Agent:
+         self.spent = 0.0
+         self.hands = 1000
+         self.bank = self.BANK
++        self.flat = False
+         self.speed = 1.0
+         self.heavy = self.TARGET
+         self.seen = {"cal": 0.0, "clock": 0.0, "end": 0.0, "endmax": 0.0, "late": 0, "told": False,
+                      False: [0, 0.0, 0.0], True: [0, 0.0, 0.0], "hist": [0] * 8}
+ 
++    # the time bank of a table longer than 1,000 hands: "scaled" grows with the hands, "flat" is one round's
++    FINAL = "scaled"
++
+     def on_table_start(self, info):
+         self.hands = info.get("hands", 1000)
++        self.flat = self.FINAL == "flat" and self.hands > 1000
+         self.bank = self.BANK * max(1.0, self.hands / 1000.0)
+         self.bot.seats = info.get("num_players") or 0
+         if not self.CALIBRATE:
+@@ -114,17 +119,26 @@ class Agent:
+         try:
+             hand = state.get("hand_number", 1)
+             while hand > self.hands:
+-                # more hands than the table announced: the time bank is taken to grow with them
++                # more hands than the table announced: the time bank is taken to grow with them, unless FINAL says not
+                 self.hands += 1000
+                 self.bank += self.BANK
++                self.flat = self.FINAL == "flat"
+             per_hand = (self.bank - self.spent) / max(1, self.hands - hand + 1)
+             bot.trials = (self.base_trials if per_hand > 0.004 else
+                           45 if per_hand > 0.002 else 24 if per_hand > 0.0008 else 0)
++            if self.flat:
++                # one round's bank cannot pay for the whole table, and being auto-played costs less than playing
++                # by the quick rules: the shallowest real thinking on every decision until the server stops asking
++                bot.trials = 16
+             # out of budget by the bot's own count: while the server still asks, it answers with the quick rules
+             quick = bot.trials == 0
+             bot.trials = bot.trials or 16
++            # depth falls as the spend projected from the pace so far passes 70% of the bank, to its floor at 86%;
++            # heavy rounds start fast, so it engages early in them, and it makes the quick rules rarer, not impossible
++            ahead = self.spent * self.hands / max(hand - 1, 50)
++            room = min(1.0, max(0.2, 4.5 - 5.0 * ahead / self.bank))
+             # a smaller budget must not be spent back by the speed controller
+-            bot.scale = min(self.speed, bot.trials / self.base_trials)
++            bot.scale = min(self.speed, bot.trials / self.base_trials, room)
+             bot.deadline = (t if quick else t + self.LIMIT) if self.CALIBRATE or quick else None
+             a = bot.decide(convert_state(state))
+             out = {"action": a.kind}
+diff --git a/pokerbot/cards.py b/pokerbot/cards.py
+index 991b834..9d21120 100644
+--- a/pokerbot/cards.py
++++ b/pokerbot/cards.py
+@@ -93,7 +93,7 @@ def _rank_value(key):
+     return TOP5[mask]
+ 
+ 
+-_STOP = perf_counter() + 0.4
++_STOP = perf_counter() + 1.5
+ 
+ 
+ def _warm(r, left, key):
+diff --git a/tests/test_engine_fuzz.py b/tests/test_engine_fuzz.py
+index 811756f..75315bf 100644
+--- a/tests/test_engine_fuzz.py
++++ b/tests/test_engine_fuzz.py
+@@ -17,6 +17,19 @@ class EngineFuzzTest(unittest.TestCase):
+         self.assertEqual(dict(probe.errors), {})
+         self.assertEqual(dict(probe.flags), {})
+ 
++    def test_full_tables_of_nine_and_ten(self):
++        mod = fuzz.load("bot.py", "bot_under_fuzz_full")
++        probe = fuzz.Probe(mod)
++        seed = 700
++        for name in ("house", "wild", "limp", "self"):
++            for players in (9, 10):
++                seed += 1
++                fuzz.run(mod, probe, fuzz.FIELDS[name], players, "no_limit", 0, 40, seed)
++        self.assertGreater(probe.decisions, 300)
++        self.assertGreater(max(k[1] for k in probe.cpu), 7)
++        self.assertEqual(dict(probe.errors), {})
++        self.assertEqual(dict(probe.flags), {})
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tests/test_play.py b/tests/test_play.py
+index 8930c73..b9d9985 100644
+--- a/tests/test_play.py
++++ b/tests/test_play.py
+@@ -4,6 +4,7 @@ import unittest
+ from arena.engine import Table
+ from arena.opponents import ALL
+ from pokerbot import Bot
++from pokerbot.agent import Agent
+ from pokerbot.model import Model, classify
+ from pokerbot.state import Rec
+ 
+@@ -40,6 +41,36 @@ class PlayTest(unittest.TestCase):
+             m.observe(classify(hist, 20), "h")
+         self.assertLess(m.freq("v", "unopened", "raise"), base / 3)
+ 
++    def test_long_table_bank(self):
++        state = {"hole_cards": ["7c", "2d"], "board": [], "seat": 2, "button": 0, "stacks": [2000, 1990, 1980],
++                 "bets": [0, 10, 20], "folded": [False] * 3, "pot": 30, "to_call": 20, "min_raise_to": 40,
++                 "max_raise_to": 2000, "big_blind": 20, "hand_number": 4000, "legal_actions": ["fold", "call", "raise"],
++                 "history": [{"seat": 1, "street": "preflop", "action": "small_blind", "amount": 10},
++                             {"seat": 2, "street": "preflop", "action": "big_blind", "amount": 20}]}
++        for final, hands, spent, hand, trials in (
++                ("flat", 5000, 0.0, 4000, 16), ("flat", 5000, 99.0, 4000, 16), ("flat", 1000, 0.0, 1000, 90),
++                ("flat", 1000, 0.0, 1001, 16), ("scaled", 1000, 0.0, 1001, 90), ("scaled", 5000, 0.0, 4000, 90),
++                ("scaled", 5000, 39.0, 4000, 24)):
++            a = Agent()
++            a.CALIBRATE = False
++            a.FINAL = final
++            a.on_table_start({"hands": hands, "num_players": 3})
++            a.spent = spent
++            state["hand_number"] = hand
++            self.assertIn(a.act(state)["action"], ("fold", "call", "raise"))
++            self.assertEqual(a.bot.trials, trials)
++            self.assertIsNone(a.bot.deadline)
++        # half-way through a round, a spend heading for 4.0, 6.4 and 8.0 s of the bot's 8 s
++        for spent, scale in ((2.0, 1.0), (3.2, 0.5), (4.0, 0.2)):
++            a = Agent()
++            a.CALIBRATE = False
++            a.on_table_start({"hands": 1000, "num_players": 3})
++            a.spent = spent
++            state["hand_number"] = 501
++            a.act(state)
++            self.assertEqual(a.bot.trials, 90)
++            self.assertAlmostEqual(a.bot.scale, scale)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
