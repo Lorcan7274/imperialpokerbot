@@ -27,13 +27,17 @@ class House(Base):
 
 
 class KitSeat:
-    def __init__(self, agent, seats):
+    def __init__(self, agent, seats, name="hero", hands=1000):
         self.agent = agent
         self.seats = seats
         self.worst = 0.0
         self.total = 0.0
         self.decisions = 0
-        agent.on_table_start({"seat": seats.index("hero"), "num_players": len(seats), "hands": 1000})
+        if hasattr(agent, "on_table_start"):
+            agent.on_table_start({
+                "seat": seats.index(name), "num_players": len(seats), "hands": hands,
+                "starting_stack": 2000, "stacks_reset_each_hand": True, "small_blind": 10,
+                "big_blind": 20, "betting": "no_limit", "raise_cap": None})
 
     def history(self, records):
         return [{"seat": self.seats.index(r.player), "street": STREET[r.street],
@@ -69,8 +73,12 @@ class KitSeat:
         return Action(kind, out.get("amount") or 0)
 
     def end_hand(self, history, showdown):
+        if not hasattr(self.agent, "on_hand_end"):
+            return
         t = time.perf_counter()
-        self.agent.on_hand_end({"history": self.history(history)})
+        shown = {str(self.seats.index(p)): [card_str(c) for c in cards]
+                 for p, cards in (showdown or {}).items()}
+        self.agent.on_hand_end({"history": self.history(history), "shown": shown})
         self.total += time.perf_counter() - t
 
 
