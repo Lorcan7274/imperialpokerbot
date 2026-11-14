@@ -1,3 +1,4 @@
+from bisect import bisect
 from itertools import accumulate
 from time import perf_counter
 
@@ -11,6 +12,7 @@ for _q in _Q:
     _t += _q
     _QCUM.append(_t)
 _ALL = range(NCOMBO)
+STRATIFY = True
 _BASE = [1.0 / q for q in _Q]
 _RANK = [RANK_KEY[a] + RANK_KEY[b] for a, b in COMBOS]
 _SUIT = [SUIT_KEY[a] + SUIT_KEY[b] for a, b in COMBOS]
@@ -141,9 +143,21 @@ def simulate(hero, board, sample, ranges, trials, rng, deadline=None):
     combos, masks, ranks, suits = sample.combos, sample.mask, sample.rank, sample.suit
     idx = range(sample.size)
     picks = []
+    order = sample.board(board)[1] if board else sample.pre_order
     for w in ranges:
-        cum = list(accumulate(w))
-        picks.append(rng.choices(idx, cum_weights=cum if cum and cum[-1] > 0 else None, k=trials))
+        cum = list(accumulate([w[i] for i in order]))
+        total = cum[-1] if cum else 0.0
+        if total <= 0 or not STRATIFY:
+            flat = list(accumulate(w))
+            picks.append(rng.choices(idx, cum_weights=flat if flat and flat[-1] > 0 else None, k=trials))
+            continue
+        # evenly spaced draws along the range from strongest to weakest hand steady a short simulation
+        step = total / trials
+        u = rng.random()
+        top = len(order) - 1
+        pick = [order[min(top, bisect(cum, (j + u) * step))] for j in range(trials)]
+        rng.shuffle(pick)
+        picks.append(pick)
     rnd = rng.random
     get = _CACHE.get
     rk0 = RANK_KEY[hero[0]] + RANK_KEY[hero[1]]

@@ -171,8 +171,9 @@ class Bot:
             limit = 0.07 if many else 0.1
         return Action("call") if odds <= limit else Action("fold")
 
-    def _trials(self, opponents):
-        return max(16, int(self.trials * self.scale * min(1.0, 3.0 / (1 + opponents))))
+    def _trials(self, opponents, heavy=False):
+        # a decision for a large part of the stack is rare and worth a steadier estimate
+        return max(16, int(self.trials * self.scale * min(1.0, 3.0 / (1 + opponents)) * (2 if heavy else 1)))
 
     def _legal(self, s, a):
         can_raise = s.max_raise_to > s.my_bet + s.to_call
@@ -397,18 +398,22 @@ class Bot:
                         jam = jam or e.jam
                     elif e.player == v and e.act == "call":
                         x *= min(1.0, freq(v, e.sit, "raise", n) + freq(v, e.sit, "call", n))
-                t = self.model.jamx.get(v)
-                if jam and t:
-                    # hands this player has shown after going all-in say more than how often it does
-                    x = (3 * x + 2 * t[1]) / (3 + t[0])
+                if jam:
+                    # shown all-in hands in this field run about twice as wide as the frequency suggests
+                    t = self.model.jamx.get(v, (0, 0.0))
+                    x = (2 * x + 2 * (t[1] + 0.06)) / (4 + t[0])
                 eq = topx(name, x)
                 if name in ("AA", "KK"):
                     eq = max(eq, 0.5)
             else:
+                # several players all-in show premium hands, and a short simulation can flatter a weak one
+                if len(into) > 1 and s.to_call >= 0.4 * s.my_stack and p > (
+                        0.25 if any(v in clones for v in into) else 0.12):
+                    return Action("fold")
                 roles = self._roles(s, events)
                 ranges = self._ranges(s, events, roles)
                 against = [ranges[v] for v in into] or list(ranges.values())
-                sim = simulate(s.hole, [], self._sample, against, self._trials(len(against)),
+                sim = simulate(s.hole, [], self._sample, against, self._trials(len(against), True),
                                self.rng, self.deadline)
                 if not sim or (len(sim) < 12 and self._late() and not any(roles.values())):
                     return self._quick(s)
@@ -471,7 +476,8 @@ class Bot:
                 if p < min(0.92, 0.62 * width * sizeadj):
                     return Action("call")
                 return Action("fold")
-            if p < 0.045 * width:
+            # an unusually large open is a narrower range, so fewer hands re-raise it for value
+            if p < 0.045 * width * min(1.0, 3.5 * bb / level):
                 return self._raise(s, to)
             if p < (0.24 if s.my_bet >= bb else 0.11) * width * sizeadj:
                 return Action("call")
@@ -572,8 +578,8 @@ class Bot:
             hv = evaluate(list(s.hole) + list(s.board))
             eq_with = lambda mults=None: river_equity(hv, vals, rl, mults)
         else:
-            sim = simulate(s.hole, s.board, sample, rl, self._trials(len(rl)), self.rng,
-                           self.deadline)
+            sim = simulate(s.hole, s.board, sample, rl, self._trials(len(rl), c >= 0.2 * s.my_stack),
+                           self.rng, self.deadline)
             if not sim or (len(sim) < 12 and self._late() and not any(roles.values())):
                 return self._quick(s)
             eq_with = lambda mults=None: sim_equity(sim, mults)
