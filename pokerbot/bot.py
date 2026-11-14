@@ -51,11 +51,11 @@ class Bot:
     def end_hand(self, history=None, showdown=None):
         if history:
             self._hist = list(history)
-        self._commit()
+        self._commit(showdown)
 
-    def _commit(self):
+    def _commit(self, shown=None):
         if self._hist:
-            self.model.observe(classify(self._hist, self._bb), self._hero)
+            self.model.observe(classify(self._hist, self._bb), self._hero, shown)
         self._hist = []
 
     def _late(self):

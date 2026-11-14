@@ -129,7 +129,9 @@ class Agent:
     def on_hand_end(self, summary):
         t = time.perf_counter()
         try:
-            self.bot.end_hand(convert_history(summary["history"]))
+            shown = {int(k): [parse_card(c) for c in v]
+                     for k, v in (summary.get("shown") or {}).items()}
+            self.bot.end_hand(convert_history(summary["history"]), shown)
         except Exception:
             pass
         if self.CALIBRATE and summary.get("hand_number", 1) % 128 == 0:

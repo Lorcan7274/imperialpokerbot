@@ -77,9 +77,11 @@ class Model:
         self.strength = strength
         self.rtot = defaultdict(int)
         self.rfit = defaultdict(int)
-        self.unclone = set()
+        self.acts = defaultdict(int)
+        self.viol = defaultdict(int)
+        self.badshow = defaultdict(int)
 
-    def observe(self, events, hero):
+    def observe(self, events, hero, shown=None):
         seen = set()
         hot = set()
         for e in events:
@@ -87,6 +89,7 @@ class Model:
             if p == hero:
                 continue
             seen.add(p)
+            self.acts[p] += 1
             self.opp[(p, e.sit)] += 1
             self.cnt[(p, e.sit, e.act)] += 1
             if e.street == 0:
@@ -100,13 +103,19 @@ class Model:
             elif e.act == "call" and e.big:
                 hot.add(p)
             elif e.act == "fold" and (p in hot or not e.big):
-                self.unclone.add(p)
+                self.viol[p] += 1
         for p in seen:
             self.hands[p] += 1
+        for p, cards in (shown or {}).items():
+            if p != hero and p in seen and len(cards) == 2:
+                a, b = cards[0] >> 2, cards[1] >> 2
+                if (a == b or a >= 11 or b >= 11) != (p in hot):
+                    self.badshow[p] += 1
 
     def is_clone(self, p):
         n = self.rtot[p]
-        return n >= 2 and p not in self.unclone and self.rfit[p] * 8 >= n * 7
+        return (n >= 2 and self.rfit[p] * 8 >= n * 7 and self.badshow[p] < 3
+                and self.viol[p] <= 3 + 0.01 * self.acts[p])
 
     def freq(self, player, sit, act, n=2):
         prior = PRIORS[(sit, act)][0 if n <= 2 else 1]
