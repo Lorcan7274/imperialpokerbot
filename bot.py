@@ -99,6 +99,18 @@ def _rank_value(key):
     return TOP5[mask]
 
 
+def _warm(r, left, key):
+    if r == 13:
+        if left <= 2:
+            _CACHE[key] = _rank_value(key)
+        return
+    for k in range(min(4, left) + 1):
+        _warm(r + 1, left - k, key + (k << (3 * r)))
+
+
+_warm(0, 7, 0)
+
+
 def evaluate(cards):
     rk = 0
     sk = 0
@@ -724,7 +736,8 @@ PRIORS = {
     ("vs_3bet", "fold"): (0.55, 0.60),
     ("vs_3bet", "call"): (0.30, 0.27),
     ("vs_3bet", "raise"): (0.15, 0.13),
-    ("p_no_bet", "raise"): (0.40, 0.30),
+    ("p_no_bet", "raise"): (0.30, 0.25),
+    ("p_no_bet:a", "raise"): (0.55, 0.55),
     ("p_vs_bet", "fold"): (0.42, 0.45),
     ("p_vs_bet", "call"): (0.46, 0.45),
     ("p_vs_bet", "raise"): (0.12, 0.10),
@@ -733,10 +746,22 @@ PRIORS = {
     ("p_vs_raise", "raise"): (0.13, 0.15),
     ("jam", "jam"): (0.03, 0.02),
 }
+for _sit in ("p_vs_bet", "p_vs_raise"):
+    for _tag, _f, _c, _r in ((":k", 0.55, 0.38, 0.07), (":a", 0.22, 0.60, 0.18), (":s", 0.28, 0.62, 0.10)):
+        PRIORS[(_sit + _tag, "fold")] = (_f, _f)
+        PRIORS[(_sit + _tag, "call")] = (_c, _c)
+        PRIORS[(_sit + _tag, "raise")] = (_r, _r)
 
 
-def classify(history, bb, stack=2000):
+def line(p, raises, agg, stuck, checked):
+    if raises == 0:
+        return ":a" if p in agg else ""
+    return ":k" if p in checked else ":a" if p in agg else ":s" if p in stuck else ""
+
+
+def classify(history, bb, stack=2000, ctx=None):
     out = []
+    agg, stuck, checked = set(), set(), set()
     street = None
     level = 0
     raises = 0
@@ -751,6 +776,7 @@ def classify(history, bb, stack=2000):
             raises = 0
             last = bb
             bets = {}
+            checked = set()
         p = r.player
         prev = bets.get(p, 0)
         if r.kind in ("sb", "bb"):
@@ -762,7 +788,8 @@ def classify(history, bb, stack=2000):
         if street == 0:
             sit = "unopened" if raises == 0 else "vs_raise" if raises == 1 else "vs_3bet"
         else:
-            sit = "p_no_bet" if raises == 0 else "p_vs_bet" if raises == 1 else "p_vs_raise"
+            sit = ("p_no_bet" if raises == 0 else "p_vs_bet" if raises == 1 else "p_vs_raise") + line(
+                p, raises, agg, stuck, checked)
         fit = False
         big = level - prev > 2 * bb
         if r.kind == "raise":
@@ -775,10 +802,17 @@ def classify(history, bb, stack=2000):
             if r.to - level >= last:
                 last = r.to - level
             level = max(level, r.to)
+            agg.add(p)
+        elif r.kind == "call" and street:
+            stuck.add(p)
+        elif r.kind == "check":
+            checked.add(p)
         if r.kind in ("call", "raise"):
             bets[p] = r.to
             paid[p] = paid.get(p, 0) + r.to - prev
             pot += r.to - prev
+    if ctx is not None:
+        ctx.update(agg=agg, stuck=stuck, checked=checked)
     return out
 
 
@@ -832,7 +866,7 @@ class Model:
 
     def freq(self, player, sit, act, n=2):
         prior = PRIORS[(sit, act)][0 if n <= 2 else 1]
-        k = 4.0 if sit == "jam" else self.strength
+        k = 4.0 if sit == "jam" or sit[1] == "_" else self.strength
         return (self.cnt[(player, sit, act)] + prior * k) / (self.opp[(player, sit)] + k)
 
 
@@ -999,13 +1033,17 @@ def river_equity(hv, vals, ranges, mults=None):
 
 
 
-FLOOR = {1: 0.25, 2: 0.18, 3: 0.10}
+NOISE = {1: 0.30, 2: 0.22, 3: 0.14}
 BOARD_LEN = {1: 3, 2: 4, 3: 5}
 MAX_EVENTS = 8
 
 
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
+
+
+def floor_for(f, noise):
+    return noise * f / (noise * f + 1 - noise)
 
 
 class Bot:
@@ -1100,14 +1138,16 @@ class Bot:
                 narrow(w, order, fr * 0.6, fr + f("call"), 0.35, 0.04)
             return
         _, order = sample.board(s.board[:BOARD_LEN[e.street]])
-        floor = FLOOR[e.street]
-        if e.sit == "p_no_bet":
+        noise = NOISE[e.street]
+        if e.sit[:8] == "p_no_bet":
+            fr = f("raise")
             if e.act == "raise":
-                narrow(w, order, 0, f("raise"), 1, floor)
+                narrow(w, order, 0, fr, 1, floor_for(fr, noise))
             elif e.act == "check":
-                narrow(w, order, f("raise"), 1, 0.35, 1)
+                narrow(w, order, fr, 1, 0.35, 1)
         elif e.act == "raise":
-            narrow(w, order, 0, f("raise"), 1, floor * 0.6)
+            fr = f("raise")
+            narrow(w, order, 0, fr, 1, floor_for(fr, noise * 0.6))
         elif e.act == "call":
             narrow(w, order, f("raise"), 1 - f("fold"), 0.5, 0.05)
 
@@ -1292,7 +1332,8 @@ class Bot:
     def _postflop(self, s):
         n = len(s.players)
         bb = s.big_blind
-        events = classify(s.history, bb)
+        ctx = {}
+        events = classify(s.history, bb, ctx=ctx)
         roles = self._roles(s, events)
         ranges = self._ranges(s, events, roles)
         sample = self._sample
@@ -1318,6 +1359,7 @@ class Bot:
         most = s.max_raise_to - s.my_bet
         barrel = "strong" in roles.values()
         soft = "weak" in roles.values()
+        tag = {v: line(v, 1, ctx["agg"], ctx["stuck"], ctx["checked"]) for v in ranges}
 
         def response(sit, chips, x, ref):
             phi = 1.0
@@ -1330,7 +1372,7 @@ class Bot:
                 elif role == "weak":
                     ff = 1.0 if chips > 2 * bb else 0.0
                 else:
-                    ff = clamp(freq(v, sit, "fold", n) * (x / ref) ** 0.7, 0.02, 0.95)
+                    ff = clamp(freq(v, sit + tag[v], "fold", n) * (x / ref) ** 0.7, 0.02, 0.95)
                     exact = False
                 phi *= ff
                 mults.append(keep_top(w, order, 1 - ff, 0.02) if 0.0 < ff < 1.0 else None)
@@ -1340,7 +1382,7 @@ class Bot:
 
         def risk(sit):
             return max(1.0 if roles.get(v) == "strong" else 0.0 if roles.get(v) == "weak"
-                       else freq(v, sit, "raise", n) for v in ranges)
+                       else freq(v, sit + tag[v], "raise", n) for v in ranges)
 
         if c <= 0:
             real = (1.0 if ip else 0.93) if st == 3 else (0.95 if ip else 0.85)
@@ -1350,9 +1392,9 @@ class Bot:
             fr = risk("p_vs_bet")
             floor = 2 * bb + 5
             sizes = ([2 * bb, floor] if soft else []) + [max(f * P, floor) for f in (0.33, 0.7, 1.1)]
-            if barrel:
-                sizes.append(1e9)
-            for size in sizes:
+            thin = len(sizes) - 1
+            sizes += [1e9] if barrel else [2.2 * P, 1e9]
+            for k, size in enumerate(sizes):
                 if self._late():
                     break
                 b = size
@@ -1365,7 +1407,7 @@ class Bot:
                     ev -= (1 - phi) * fr * b * 0.5
                 if ev > best_ev + 0.02 * P:
                     best, best_ev = Action("raise", s.my_bet + b), ev
-                if b >= most:
+                if b >= most or (k >= thin and not barrel and (eqc < 0.6 or best.kind == "check")):
                     break
             return best
 
@@ -1379,7 +1421,7 @@ class Bot:
         best, best_ev = (Action("call"), ev_call) if ev_call > 0 else (Action("fold"), 0.0)
         if can_raise:
             rr = risk("p_vs_raise")
-            for frac in (0.6, 1.0, 1e9) if barrel else (0.6, 1.0):
+            for frac in (0.6, 1.0, 1e9):
                 if self._late():
                     break
                 a = c + frac * (P + c)
@@ -1392,7 +1434,7 @@ class Bot:
                     ev -= (1 - phi) * rr * a * 0.5
                 if ev > best_ev + 0.15 * P:
                     best, best_ev = Action("raise", s.my_bet + a), ev
-                if a >= most:
+                if a >= most or (frac >= 1.0 and not barrel and (eqc < 0.6 or best.kind != "raise")):
                     break
         return best
 

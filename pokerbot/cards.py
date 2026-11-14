@@ -91,6 +91,18 @@ def _rank_value(key):
     return TOP5[mask]
 
 
+def _warm(r, left, key):
+    if r == 13:
+        if left <= 2:
+            _CACHE[key] = _rank_value(key)
+        return
+    for k in range(min(4, left) + 1):
+        _warm(r + 1, left - k, key + (k << (3 * r)))
+
+
+_warm(0, 7, 0)
+
+
 def evaluate(cards):
     rk = 0
     sk = 0

@@ -3,18 +3,22 @@ from time import perf_counter
 
 from .cards import evaluate
 from .clone_table import CLONE1, CLONE2
-from .model import Model, classify
+from .model import Model, classify, line
 from .preflop import class_name, percentile
 from .ranges import Sample, keep_top, narrow, river_equity, sim_equity, simulate
 from .state import Action
 
-FLOOR = {1: 0.25, 2: 0.18, 3: 0.10}
+NOISE = {1: 0.30, 2: 0.22, 3: 0.14}
 BOARD_LEN = {1: 3, 2: 4, 3: 5}
 MAX_EVENTS = 8
 
 
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
+
+
+def floor_for(f, noise):
+    return noise * f / (noise * f + 1 - noise)
 
 
 class Bot:
@@ -109,14 +113,16 @@ class Bot:
                 narrow(w, order, fr * 0.6, fr + f("call"), 0.35, 0.04)
             return
         _, order = sample.board(s.board[:BOARD_LEN[e.street]])
-        floor = FLOOR[e.street]
-        if e.sit == "p_no_bet":
+        noise = NOISE[e.street]
+        if e.sit[:8] == "p_no_bet":
+            fr = f("raise")
             if e.act == "raise":
-                narrow(w, order, 0, f("raise"), 1, floor)
+                narrow(w, order, 0, fr, 1, floor_for(fr, noise))
             elif e.act == "check":
-                narrow(w, order, f("raise"), 1, 0.35, 1)
+                narrow(w, order, fr, 1, 0.35, 1)
         elif e.act == "raise":
-            narrow(w, order, 0, f("raise"), 1, floor * 0.6)
+            fr = f("raise")
+            narrow(w, order, 0, fr, 1, floor_for(fr, noise * 0.6))
         elif e.act == "call":
             narrow(w, order, f("raise"), 1 - f("fold"), 0.5, 0.05)
 
@@ -301,7 +307,8 @@ class Bot:
     def _postflop(self, s):
         n = len(s.players)
         bb = s.big_blind
-        events = classify(s.history, bb)
+        ctx = {}
+        events = classify(s.history, bb, ctx=ctx)
         roles = self._roles(s, events)
         ranges = self._ranges(s, events, roles)
         sample = self._sample
@@ -327,6 +334,7 @@ class Bot:
         most = s.max_raise_to - s.my_bet
         barrel = "strong" in roles.values()
         soft = "weak" in roles.values()
+        tag = {v: line(v, 1, ctx["agg"], ctx["stuck"], ctx["checked"]) for v in ranges}
 
         def response(sit, chips, x, ref):
             phi = 1.0
@@ -339,7 +347,7 @@ class Bot:
                 elif role == "weak":
                     ff = 1.0 if chips > 2 * bb else 0.0
                 else:
-                    ff = clamp(freq(v, sit, "fold", n) * (x / ref) ** 0.7, 0.02, 0.95)
+                    ff = clamp(freq(v, sit + tag[v], "fold", n) * (x / ref) ** 0.7, 0.02, 0.95)
                     exact = False
                 phi *= ff
                 mults.append(keep_top(w, order, 1 - ff, 0.02) if 0.0 < ff < 1.0 else None)
@@ -349,7 +357,7 @@ class Bot:
 
         def risk(sit):
             return max(1.0 if roles.get(v) == "strong" else 0.0 if roles.get(v) == "weak"
-                       else freq(v, sit, "raise", n) for v in ranges)
+                       else freq(v, sit + tag[v], "raise", n) for v in ranges)
 
         if c <= 0:
             real = (1.0 if ip else 0.93) if st == 3 else (0.95 if ip else 0.85)
@@ -359,9 +367,9 @@ class Bot:
             fr = risk("p_vs_bet")
             floor = 2 * bb + 5
             sizes = ([2 * bb, floor] if soft else []) + [max(f * P, floor) for f in (0.33, 0.7, 1.1)]
-            if barrel:
-                sizes.append(1e9)
-            for size in sizes:
+            thin = len(sizes) - 1
+            sizes += [1e9] if barrel else [2.2 * P, 1e9]
+            for k, size in enumerate(sizes):
                 if self._late():
                     break
                 b = size
@@ -374,7 +382,7 @@ class Bot:
                     ev -= (1 - phi) * fr * b * 0.5
                 if ev > best_ev + 0.02 * P:
                     best, best_ev = Action("raise", s.my_bet + b), ev
-                if b >= most:
+                if b >= most or (k >= thin and not barrel and (eqc < 0.6 or best.kind == "check")):
                     break
             return best
 
@@ -388,7 +396,7 @@ class Bot:
         best, best_ev = (Action("call"), ev_call) if ev_call > 0 else (Action("fold"), 0.0)
         if can_raise:
             rr = risk("p_vs_raise")
-            for frac in (0.6, 1.0, 1e9) if barrel else (0.6, 1.0):
+            for frac in (0.6, 1.0, 1e9):
                 if self._late():
                     break
                 a = c + frac * (P + c)
@@ -401,6 +409,6 @@ class Bot:
                     ev -= (1 - phi) * rr * a * 0.5
                 if ev > best_ev + 0.15 * P:
                     best, best_ev = Action("raise", s.my_bet + a), ev
-                if a >= most:
+                if a >= most or (frac >= 1.0 and not barrel and (eqc < 0.6 or best.kind != "raise")):
                     break
         return best
