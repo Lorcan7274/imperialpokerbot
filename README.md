@@ -8,17 +8,21 @@ A no-limit hold'em bot for the Imperial AI Hack poker track: 2,000-chip stacks r
 - **Opponent model**: for each opponent it counts how often they raise, call and fold in each situation, blended with sensible defaults until there is data.
 - **Range inference**: each action an opponent takes narrows the hands they can hold to the share that matches how often they take that action, so a bot that always bets keeps a wide range and a tight one a narrow range.
 - **Postflop**: it estimates equity against a weighted sample of those ranges and picks the check, call, fold, bet or raise size with the best expected value, using the opponent's measured fold rate for the chance a bet wins the pot.
+- **Bet sizes**: from the hands each opponent shows down it learns how strong their small bets, big bets, raises and shoves have been, and reads the next one the same way.
 - **All-in spots**: big preflop raises are answered by equity against the range the opponent has actually been shoving.
+- **Starter bots**: the organisers' starter bot and its variants are recognised by their raise sizes and played by their exact rules.
 
 ## Results
 
-Eight-player table in the organisers' state format (`arena/kitlike.py`), 1,000-hand rounds against stand-ins for the house bots plus tighter opponents:
+Saturday's counted rounds at the hack (real opponents, 1,000 hands a round): a mean of +62 bb/100 over the first 30 rounds, first at the table in 13 and in the top two in 17, with three losing rounds. A round took 2.1 to 4.9 s of the 10 s thinking bank and lost 0 to 6 decisions to the 10 ms limit.
+
+Local check on an eight-player table in the organisers' state format (`arena/kitlike.py`), 1,000-hand rounds against stand-ins for the house bots plus tighter opponents:
 
 | Field | bb/100 | Worst decision | Thinking per round |
 |---|---|---|---|
-| starter-style, calling station, random, tight, equity bots | about +850 | under 4 ms | under 1 s |
+| starter-style, calling station, random, tight, equity bots | about +650 (two four-round runs: +680 and +628, each give or take 230) | under 4 ms | under 1 s |
 
-The limits are 10 ms per decision and 10 s per round. The opponents are ones written for this repo, so treat the win rate as a sanity check, not a forecast.
+The limits are 10 ms per decision and 10 s per round. The local opponents are ones written for this repo, so treat that win rate as a sanity check, not a forecast.
 
 ## Files
 
