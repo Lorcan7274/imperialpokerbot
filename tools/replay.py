@@ -314,7 +314,7 @@ def replay_round(job):
             "betting": "no_limit", "raise_cap": None}
     started = call("table start", agent.on_table_start, info)[2] if hasattr(agent, "on_table_start") else 0.0
     speed0 = getattr(agent, "speed", None)
-    flags = {s: {"first": None, "on": 0} for s in range(len(teams)) if s != me}
+    flags = {s: {"spans": [], "sized": [0, 0]} for s in range(len(teams)) if s != me}
     fit = [0, 0, 0, 0]
     odd = []
     rebuilt = 0
@@ -328,10 +328,11 @@ def replay_round(job):
             rebuilt += 1
             seat = state["seat"]
             if seat != me:
-                if old == "raise" and seat in starters and state["min_raise_to"] is not None:
-                    fit[1] += 1
-                    fit[0] += old_to == min(state["min_raise_to"] + state["pot"] // 2,
-                                            state["max_raise_to"])
+                if old == "raise" and state["min_raise_to"] is not None:
+                    sized = flags[seat]["sized"]
+                    sized[1] += 1
+                    sized[0] += old_to == min(state["min_raise_to"] + state["pot"] // 2,
+                                              state["max_raise_to"])
                 if seat in starters and state["hole_cards"]:
                     want = starter_move(state)
                     fit[3] += 1
@@ -375,13 +376,17 @@ def replay_round(job):
         if is_clone:
             for s, f in flags.items():
                 if is_clone(s):
-                    f["on"] += 1
-                    if f["first"] is None:
-                        f["first"] = no
+                    if f["spans"] and f["spans"][-1][1] == no - 1:
+                        f["spans"][-1][1] = no
+                    else:
+                        f["spans"].append([no, no])
     for s, f in flags.items():
         f["final"] = bool(is_clone and is_clone(s))
         f["model"] = [getattr(model, k).get(s, 0) if hasattr(model, k) else -1
                       for k in ("rfit", "rtot", "viol", "badshow")]
+        if s in starters:
+            fit[0] += f["sized"][0]
+            fit[1] += f["sized"][1]
     return {"file": os.path.basename(path), "seat": me, "teams": teams, "meta": meta,
             "hands": len(hands), "decisions": decisions, "ends": ends, "loaded": loaded,
             "started": started, "speed0": speed0, "errors": errors, "problems": problems,
@@ -500,8 +505,9 @@ def flag_rows(r, known):
     out = []
     for s, f in sorted(r["flags"].items()):
         team = r["teams"][s]
-        late = r["hands"] - f["first"] + 1 - f["on"] if f["first"] else 0
-        out.append((team, f["final"], team in known, f["first"], late, f["model"], s))
+        spans = ", ".join("%d-%d" % tuple(x) for x in f["spans"][:4]) + (
+            " and %d more" % (len(f["spans"]) - 4) if len(f["spans"]) > 4 else "")
+        out.append((team, f["final"], team in known, spans or "never", f["model"], f["sized"], s))
     return out
 
 
@@ -527,12 +533,12 @@ def show(r, a):
     trouble(r["errors"], ds)
     clock_report(ds, r["ends"], a)
     if r["can_flag"]:
-        print("   starter flags   seat team                      flagged known  first hand  off later  "
-              "fit/raises  viol  badshow")
-        for team, final, want, first, late, m, s in flag_rows(r, known):
-            print("   %-15s %4d %-25s %-7s %-5s  %10s  %9d  %5d/%-5d %4d  %7d" % (
+        print("   starter flags   seat team                      at end  known  raises of starter size: "
+              "rebuilt  bot's count  viol  badshow  flagged after hands")
+        for team, final, want, spans, m, sized, s in flag_rows(r, known):
+            print("   %-15s %4d %-25s %-7s %-5s %26d/%-5d %5d/%-5d %5d  %7d  %s" % (
                 "" if final == want else "MISMATCH", s, team[:25], "yes" if final else "no",
-                "yes" if want else "no", first or "-", late, m[0], m[1], m[2], m[3]))
+                "yes" if want else "no", sized[0], sized[1], m[0], m[1], m[2], m[3], spans))
     actions(ds)
 
 
@@ -555,14 +561,14 @@ def overall(rounds, a):
         wrong = 0
         teams = {}
         for r in rounds:
-            for team, final, want, first, late, m, s in flag_rows(r, known):
+            for team, final, want, spans, m, sized, s in flag_rows(r, known):
                 wrong += final != want
-                teams.setdefault(team, []).append("%s %s%s" % (
-                    r["file"].rsplit("_", 1)[-1].split(".")[0],
-                    "flagged from hand %s" % first if final else "not flagged",
-                    ", off for %d hands after hand %s" % (late, first) if late else ""))
-        print("   starter flags against the known list: %s" % (
-            "all match" if not wrong else "%d MISMATCHES" % wrong))
+                teams.setdefault(team, []).append("%s %s%s (%d/%d)" % (
+                    r["file"].rsplit("_", 1)[-1].split(".")[0], spans,
+                    "" if final or spans == "never" else " but not at the end", sized[0], sized[1]))
+        print("   starter flags at the end of each round against the known list: %s; per team, the hands "
+              "after which it was flagged (raises of starter size / raises)" % (
+                  "all match" if not wrong else "%d MISMATCHES" % wrong))
         for team, notes in sorted(teams.items(), key=lambda kv: (kv[0] not in known, kv[0])):
             print("   %-8s %-25s %s" % ("starter" if team in known else "other", team[:25], "; ".join(notes)))
 
