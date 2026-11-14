@@ -24,20 +24,20 @@ def tell_key(e):
     return (g, k)
 
 PRIORS = {
-    ("unopened", "raise"): (0.45, 0.17),
-    ("unopened", "call"): (0.15, 0.05),
-    ("unopened:l", "raise"): (0.45, 0.33),
-    ("unopened:l", "call"): (0.15, 0.06),
-    ("unopened:b", "raise"): (0.45, 0.42),
-    ("unopened:b", "call"): (0.15, 0.12),
-    ("unopened:o", "raise"): (0.30, 0.28),
+    ("unopened", "raise"): (0.45, 0.19),
+    ("unopened", "call"): (0.15, 0.01),
+    ("unopened:l", "raise"): (0.45, 0.40),
+    ("unopened:l", "call"): (0.15, 0.01),
+    ("unopened:b", "raise"): (0.45, 0.52),
+    ("unopened:b", "call"): (0.15, 0.08),
+    ("unopened:o", "raise"): (0.30, 0.27),
     ("unopened:o", "call"): (0.01, 0.01),
-    ("unopened:l", "jam"): (0.012, 0.012),
-    ("unopened:b", "jam"): (0.012, 0.012),
-    ("unopened:o", "jam"): (0.012, 0.012),
-    ("vs_raise", "fold"): (0.50, 0.75),
-    ("vs_raise", "call"): (0.38, 0.18),
-    ("vs_raise", "raise"): (0.12, 0.07),
+    ("unopened:l", "jam"): (0.012, 0.004),
+    ("unopened:b", "jam"): (0.012, 0.004),
+    ("unopened:o", "jam"): (0.012, 0.004),
+    ("vs_raise", "fold"): (0.50, 0.79),
+    ("vs_raise", "call"): (0.38, 0.15),
+    ("vs_raise", "raise"): (0.12, 0.06),
     ("vs_3bet", "fold"): (0.55, 0.83),
     ("vs_3bet", "call"): (0.30, 0.10),
     ("vs_3bet", "raise"): (0.15, 0.07),
@@ -53,9 +53,9 @@ PRIORS = {
     ("p_vs_raise", "fold"): (0.45, 0.80),
     ("p_vs_raise", "call"): (0.42, 0.17),
     ("p_vs_raise", "raise"): (0.13, 0.03),
-    ("jam", "jam"): (0.03, 0.02),
-    ("unopened", "jam"): (0.012, 0.012),
-    ("vs_raise", "jam"): (0.02, 0.02),
+    ("jam", "jam"): (0.03, 0.01),
+    ("unopened", "jam"): (0.012, 0.004),
+    ("vs_raise", "jam"): (0.02, 0.005),
     ("vs_3bet", "jam"): (0.08, 0.06),
     ("re_raised", "jam"): (0.08, 0.08),
     ("vs_hero", "raise"): (0.12, 0.06),
@@ -66,10 +66,10 @@ PRIORS = {
 }
 # starting rates by line are the field's own, measured over the real rounds
 for _sit, _rows in (
-        ("p_vs_bet", ((":k", 0.55, 0.42, 0.03), (":a", 0.30, 0.52, 0.18), (":s", 0.25, 0.62, 0.13),
-                      (":x", 0.15, 0.67, 0.18), (":b", 0.15, 0.60, 0.25))),
-        ("p_vs_raise", ((":k", 0.85, 0.13, 0.02), (":a", 0.50, 0.42, 0.08), (":s", 0.20, 0.72, 0.08),
-                        (":x", 0.15, 0.67, 0.18), (":b", 0.15, 0.60, 0.25)))):
+        ("p_vs_bet", ((":k", 0.60, 0.37, 0.03), (":a", 0.36, 0.49, 0.15), (":s", 0.33, 0.55, 0.12),
+                      (":x", 0.22, 0.66, 0.12), (":b", 0.28, 0.50, 0.22))),
+        ("p_vs_raise", ((":k", 0.85, 0.13, 0.02), (":a", 0.60, 0.36, 0.04), (":s", 0.20, 0.72, 0.08),
+                        (":x", 0.22, 0.66, 0.12), (":b", 0.28, 0.50, 0.22)))):
     for _tag, _f, _c, _r in _rows:
         PRIORS[(_sit + _tag, "fold")] = (_f, _f)
         PRIORS[(_sit + _tag, "call")] = (_c, _c)

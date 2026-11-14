@@ -270,7 +270,8 @@ class Bot:
             elif role == "weak":
                 w = [0.0 if k else x for x, k in zip(sample.base, sample.strong)]
             else:
-                w = list(sample.base)
+                # hands that share a card with the board come out first, so no share of the range is spent on them
+                w = [0.0 if vals[i] < 0 else x for i, x in enumerate(sample.base)] if vals else list(sample.base)
                 mine = seen.get(v, ())
                 if len(mine) > MAX_EVENTS:
                     mine = mine[:3] + mine[3 - MAX_EVENTS:]
