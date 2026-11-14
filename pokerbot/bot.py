@@ -103,6 +103,7 @@ class Bot:
     KEEP = True
     OPEN_BB = 3.5
     TELLS = True
+    OFFSUIT = 0.5
     ONEPAIR = ({"j": 0.5, "J": 0.5},
                {0: 0.55, 1: 0.55, 2: 0.55, 3: 0.5, 4: 0.38, 5: 0.3, "j": 0.45, "J": 0.35})
 
@@ -619,8 +620,11 @@ class Bot:
             # against someone who re-raises most opens, most of an opening range is ahead
             if p < max(0.03 * width, 0.2 * f3):
                 return self._raise(s, 2.3 * level)
-            if p < max(((0.30 if n == 2 else 0.14) if invested else 0.05) * width,
-                       0.6 * f3 if invested else 0.0):
+            limit = max(((0.30 if n == 2 else 0.14) if invested else 0.05) * width, 0.6 * f3 if invested else 0.0)
+            # in the real rounds calling a re-raise with two unpaired offsuit cards lost three times what folding costs
+            if n > 2 and s.hole[0] >> 2 != s.hole[1] >> 2 and s.hole[0] & 3 != s.hole[1] & 3:
+                limit *= self.OFFSUIT
+            if p < limit:
                 return Action("call")
             if invested and self._priced(s, f3):
                 return Action("call")
