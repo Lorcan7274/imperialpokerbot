@@ -495,14 +495,28 @@ class Bot:
             if p < max(((0.30 if n == 2 else 0.14) if invested else 0.05) * width,
                        0.6 * f3 if invested else 0.0):
                 return Action("call")
+            if invested and self._priced(s, f3):
+                return Action("call")
             return Action("fold")
 
-        width = clamp(freq(r, raises[-1].sit, "raise", n) / 0.15, 0.5, 3.0)
+        f4 = freq(r, raises[-1].sit, "raise", n)
+        width = clamp(f4 / 0.15, 0.5, 3.0)
         if p < 0.022 * width:
             return Action("raise", s.max_raise_to)
         if p < 0.045 * width:
             return Action("call")
+        if s.my_bet > bb and self._priced(s, f4 * (self.model.opens(r, n) if raises[-1].sit == "re_raised" else 1.0)):
+            return Action("call")
         return Action("fold")
+
+    def _priced(self, s, x):
+        # a small re-raise can offer a price that even a modest hand should take
+        odds = s.to_call / (s.pot + s.to_call)
+        if odds >= 0.25:
+            return False
+        if s.hole[0] >> 2 == s.hole[1] >> 2 and s.to_call <= 0.07 * s.my_stack:
+            return True
+        return 0.7 * topx(class_name(*s.hole), x) > odds + 0.03
 
     def _guard(self, s, best, fallback):
         if best.kind != "raise":
