@@ -6,6 +6,7 @@ import gc
 import random
 import time
 
+
 RANKS = "23456789TJQKA"
 SUITS = "cdhs"
 
@@ -99,9 +100,12 @@ def _rank_value(key):
     return TOP5[mask]
 
 
+_STOP = perf_counter() + 0.4
+
+
 def _warm(r, left, key):
     if r == 13:
-        if left <= 2:
+        if left <= 2 and perf_counter() < _STOP:
             _CACHE[key] = _rank_value(key)
         return
     for k in range(min(4, left) + 1):
@@ -878,65 +882,97 @@ for _q in _Q:
     _t += _q
     _QCUM.append(_t)
 _ALL = range(NCOMBO)
+_BASE = [1.0 / q for q in _Q]
+_RANK = [RANK_KEY[a] + RANK_KEY[b] for a, b in COMBOS]
+_SUIT = [SUIT_KEY[a] + SUIT_KEY[b] for a, b in COMBOS]
+_MASK = [1 << a | 1 << b for a, b in COMBOS]
+_STRONG = [a >> 2 == b >> 2 or a >> 2 >= 11 or b >> 2 >= 11 for a, b in COMBOS]
 
 
 class Sample:
     def __init__(self, hero, rng, k):
-        h0, h1 = hero
-        idx = [i for i in rng.choices(_ALL, cum_weights=_QCUM, k=k)
-               if h0 not in COMBOS[i] and h1 not in COMBOS[i]]
+        dead = 1 << hero[0] | 1 << hero[1]
+        idx = [i for i in rng.choices(_ALL, cum_weights=_QCUM, k=k) if not _MASK[i] & dead]
         self.combos = [COMBOS[i] for i in idx]
-        self.base = [1.0 / _Q[i] for i in idx]
+        self.base = [_BASE[i] for i in idx]
+        self.rank = [_RANK[i] for i in idx]
+        self.suit = [_SUIT[i] for i in idx]
+        self.mask = [_MASK[i] for i in idx]
+        self.strong = [_STRONG[i] for i in idx]
         pct = [COMBO_PCT[i] for i in idx]
         self.size = len(idx)
-        self.strong = [a >> 2 == b >> 2 or a >> 2 >= 11 or b >> 2 >= 11 for a, b in self.combos]
         self.pre_order = sorted(range(self.size), key=pct.__getitem__)
         self._boards = {}
 
     def board(self, board):
         hit = self._boards.get(len(board))
         if hit is None:
-            dead = set(board)
             b = list(board)
-            vals = [-1 if x in dead or y in dead else evaluate([x, y] + b) for x, y in self.combos]
+            dead = rk = sk = 0
+            for c in b:
+                dead |= 1 << c
+                rk += RANK_KEY[c]
+                sk += SUIT_KEY[c]
+            sk += 0x3333
+            get = _CACHE.get
+            vals = []
+            add = vals.append
+            for m, r, u, xy in zip(self.mask, self.rank, self.suit, self.combos):
+                if m & dead:
+                    add(-1)
+                elif (sk + u) & 0x8888:
+                    add(evaluate(list(xy) + b))
+                else:
+                    v = get(rk + r)
+                    if v is None:
+                        v = _CACHE[rk + r] = _rank_value(rk + r)
+                    add(v)
             order = sorted((i for i in range(self.size) if vals[i] >= 0),
                            key=vals.__getitem__, reverse=True)
             hit = self._boards[len(board)] = (vals, order)
         return hit
 
 
+def _cut(xs, cums, total, bound, above):
+    lo, hi = 0, len(xs)
+    while lo < hi:
+        k = (lo + hi) // 2
+        mid = ((cums[k - 1] if k else 0.0) + xs[k] * 0.5) / total
+        if mid > bound or (mid == bound and not above):
+            hi = k
+        else:
+            lo = k + 1
+    return lo
+
+
 def narrow(w, order, lo, hi, inner, floor):
-    total = 0.0
-    for i in order:
-        total += w[i]
+    xs = [w[i] for i in order]
+    cums = list(accumulate(xs))
+    total = cums[-1] if cums else 0.0
     if total <= 0:
         return
-    cum = 0.0
-    for i in order:
-        x = w[i]
-        if x:
-            mid = (cum + x * 0.5) / total
-            cum += x
-            if mid < lo:
-                w[i] = x * inner
-            elif mid > hi:
-                w[i] = x * floor
+    # shares of the range are cumulative, so each band is a prefix or a suffix of the order
+    p = _cut(xs, cums, total, lo, False)
+    q = max(p, _cut(xs, cums, total, hi, True))
+    if inner != 1:
+        for i, x in zip(order[:p], xs):
+            w[i] = x * inner
+    if floor != 1:
+        for i, x in zip(order[q:], xs[q:]):
+            w[i] = x * floor
 
 
 def keep_top(w, order, hi, floor):
     mult = [1.0] * len(w)
-    total = 0.0
-    for i in order:
-        total += w[i]
+    xs = [w[i] for i in order]
+    cums = list(accumulate(xs))
+    total = cums[-1] if cums else 0.0
     if total <= 0:
         return mult
-    cum = 0.0
-    for i in order:
-        x = w[i]
+    q = _cut(xs, cums, total, hi, True)
+    for i, x in zip(order[q:], xs[q:]):
         if x:
-            if (cum + x * 0.5) / total > hi:
-                mult[i] = floor
-            cum += x
+            mult[i] = floor
     return mult
 
 
@@ -947,51 +983,70 @@ def simulate(hero, board, sample, ranges, trials, rng, deadline=None):
     deck = [c for c in range(52) if c not in dead]
     nd = len(deck)
     need = 5 - len(board)
-    combos = sample.combos
+    combos, masks, ranks, suits = sample.combos, sample.mask, sample.rank, sample.suit
     idx = range(sample.size)
     picks = []
     for w in ranges:
         cum = list(accumulate(w))
         picks.append(rng.choices(idx, cum_weights=cum if cum and cum[-1] > 0 else None, k=trials))
     rnd = rng.random
+    get = _CACHE.get
+    rk0 = RANK_KEY[hero[0]] + RANK_KEY[hero[1]]
+    sk0 = SUIT_KEY[hero[0]] + SUIT_KEY[hero[1]] + 0x3333
+    for c in board:
+        rk0 += RANK_KEY[c]
+        sk0 += SUIT_KEY[c]
+    hrk = RANK_KEY[hero[0]] + RANK_KEY[hero[1]]
+    hsk = SUIT_KEY[hero[0]] + SUIT_KEY[hero[1]]
     out = []
     for t in range(trials):
         if deadline and t & 7 == 7 and perf_counter() > deadline:
             break
         chosen = []
-        used = set()
+        used = 0
         for p in picks:
             i = p[t]
-            a, b = combos[i]
-            if a in used or b in used:
+            if masks[i] & used:
                 # a hand sharing a card with an earlier opponent is redrawn from the same range
                 for k in (t - 1, t - 2, t - 3):
                     i = p[k]
-                    a, b = combos[i]
-                    if a not in used and b not in used:
+                    if not masks[i] & used:
                         break
                 else:
                     chosen = None
                     break
-            used.add(a)
-            used.add(b)
+            used |= masks[i]
             chosen.append(i)
         if chosen is None:
             continue
+        rk, sk = rk0, sk0
         full = board
         if need:
             run = []
             while len(run) < need:
                 c = deck[int(rnd() * nd)]
-                if c not in used:
-                    used.add(c)
+                if not used >> c & 1:
+                    used |= 1 << c
                     run.append(c)
+                    rk += RANK_KEY[c]
+                    sk += SUIT_KEY[c]
             full = board + run
-        hv = evaluate(hero + full)
+        if sk & 0x8888:
+            hv = evaluate(hero + full)
+        else:
+            hv = get(rk)
+            if hv is None:
+                hv = _CACHE[rk] = _rank_value(rk)
+        rk -= hrk
+        sk -= hsk
         res = 1.0
         for i in chosen:
-            a, b = combos[i]
-            v = evaluate([a, b] + full)
+            if (sk + suits[i]) & 0x8888:
+                v = evaluate(list(combos[i]) + full)
+            else:
+                v = get(rk + ranks[i])
+                if v is None:
+                    v = _CACHE[rk + ranks[i]] = _rank_value(rk + ranks[i])
             if v > hv:
                 res = 0.0
                 break
@@ -1040,6 +1095,27 @@ MAX_EVENTS = 8
 
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
+
+
+STRONG_ALL = [(a, b) for a in range(52) for b in range(a)
+              if a >> 2 == b >> 2 or a >> 2 >= 11 or b >> 2 >= 11]
+
+
+def strong_river_equity(hole, board):
+    board = list(board)
+    dead = set(hole) | set(board)
+    hv = evaluate(list(hole) + board)
+    won = tot = 0.0
+    for x, y in STRONG_ALL:
+        if x in dead or y in dead:
+            continue
+        v = evaluate([x, y] + board)
+        tot += 1.0
+        if hv > v:
+            won += 1.0
+        elif hv == v:
+            won += 0.5
+    return won / tot if tot else 0.5
 
 
 def floor_for(f, noise):
@@ -1195,10 +1271,8 @@ class Bot:
                 return None
             if len(hot) >= 2:
                 return Action("raise", s.max_raise_to) if CLONE2[name] >= 0.38 else Action("fold")
-            if e1 >= 0.62:
-                return Action("raise", s.max_raise_to)
             c = s.to_call
-            if ((e1 >= 0.36 and c <= 0.07 * stack) or (e1 >= 0.45 and c <= 0.15 * stack)
+            if (e1 >= 0.62 or (e1 >= 0.36 and c <= 0.07 * stack) or (e1 >= 0.45 and c <= 0.15 * stack)
                     or (e1 >= 0.52 and c <= 0.3 * stack)):
                 return Action("call")
             return Action("fold")
@@ -1353,12 +1427,17 @@ class Bot:
                 return Action("fold")
             eq_with = lambda mults=None: sim_equity(sim, mults)
         eq = eq_with()
+        pure = all(roles.get(v) for v in ranges)
+        if st == 3 and len(rl) == 1 and "strong" in roles.values():
+            eq = strong_river_equity(s.hole, s.board)
         ip = self._in_position(s)
         can_raise = s.max_raise_to > s.my_bet + c and any(
             s.stacks.get(v, 1) > 0 for v in ranges)
         most = s.max_raise_to - s.my_bet
         barrel = "strong" in roles.values()
         soft = "weak" in roles.values()
+        # a starter bot that has raised never folds and bets every street, so the stack goes in on the river
+        wait = barrel and st < 3 and s.my_stack > P
         tag = {v: line(v, 1, ctx["agg"], ctx["stuck"], ctx["checked"]) for v in ranges}
 
         def response(sit, chips, x, ref):
@@ -1387,7 +1466,7 @@ class Bot:
         if c <= 0:
             real = (1.0 if ip else 0.93) if st == 3 else (0.95 if ip else 0.85)
             best, best_ev = Action("check"), eq * P * real
-            if not can_raise:
+            if not can_raise or wait:
                 return best
             fr = risk("p_vs_bet")
             floor = 2 * bb + 5
@@ -1419,7 +1498,7 @@ class Bot:
             real = 0.96 if ip else 0.90
         ev_call = eq * real * (P + c) - c
         best, best_ev = (Action("call"), ev_call) if ev_call > 0 else (Action("fold"), 0.0)
-        if can_raise:
+        if can_raise and not wait:
             rr = risk("p_vs_raise")
             for frac in (0.6, 1.0, 1e9):
                 if self._late():
@@ -1432,7 +1511,7 @@ class Bot:
                 ev = phi * P + (1 - phi) * (eqc * (P + 2 * a - c) - a)
                 if eqc < 0.8 and a < s.my_stack:
                     ev -= (1 - phi) * rr * a * 0.5
-                if ev > best_ev + 0.15 * P:
+                if ev > best_ev + (0.02 if pure else 0.15) * P:
                     best, best_ev = Action("raise", s.my_bet + a), ev
                 if a >= most or (frac >= 1.0 and not barrel and (eqc < 0.6 or best.kind != "raise")):
                     break
@@ -1505,8 +1584,8 @@ class Agent:
     BANK = 8.0
     OVERHEAD = 0.0008
     LIMIT = 0.004
-    REFERENCE = 0.00026
-    TARGET = 0.0015
+    REFERENCE = 0.00018
+    TARGET = 0.0012
     CALIBRATE = True
 
     def __init__(self):

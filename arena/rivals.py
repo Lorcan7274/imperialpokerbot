@@ -435,8 +435,8 @@ class Stats:
                     if k == "raise":
                         c[p, "nb_b", street, p == init] += 1
                 else:
-                    c[p, "vb", street] += 1
-                    c[p, "vb_" + k[0], street] += 1
+                    c[p, "vb", street, p in raised] += 1
+                    c[p, "vb_" + k[0], street, p in raised] += 1
                 if k == "raise":
                     nr += 1
                     aggr = p
@@ -533,6 +533,7 @@ _RAISE_F = (0.10, 0.09, 0.07)
 _FOLD_F = (0.42, 0.45, 0.5)
 _BET_FLOOR = (0.30, 0.22, 0.14)
 _RAISE_FLOOR = (0.12, 0.08, 0.05)
+_RAISED = ("open", "3bet", "4bet", "jam")
 
 
 class Rival(Base):
@@ -546,7 +547,7 @@ class Rival(Base):
         self.stats = Stats() if self.track else None
 
     def decide(self, s):
-        v = View(s)
+        self.view = v = View(s)
         if self.stats:
             self.stats.jam, self.stats.players = v.jam, s.players
         return self.post(s, v) if s.board else self.pre(s, v)
@@ -669,6 +670,47 @@ class Rival(Base):
                 won += res
                 tot += 1
         return won / tot if tot else 0.5
+
+    def jam_ev(self, s, v):
+        rate = self.stats.rate
+        pot = s.pot
+        risk = s.my_stack
+        none = total = 1.0
+        extra = 0.0
+        for p in s.active:
+            if p == s.hero:
+                continue
+            c = rate((p, "fj_c"), (p, "fj"), 0.035, 5.0)
+            lab = v.labels.get(p)
+            if lab in ("open", "3bet", "4bet"):
+                base = rate((p, "pfr"), (p, "hands"), 0.15, 10.0)
+            elif lab in ("limp", "call", "limpcall", "call3"):
+                base = rate((p, "vpip"), (p, "hands"), 0.25, 10.0)
+            else:
+                base = 1.0
+            pc = min(1.0, c / max(base, 0.02))
+            if lab == "limp":
+                pc = min(pc, 1.0 - rate((p, "lr_f"), (p, "lr"), 0.5, 5.0))
+            x = pc * allin_eq(s.hole, max(0.012, min(c, base)))
+            y = 1.0 - pc
+            none *= y
+            total *= x + y
+            extra += (v.stack0 - v.bets.get(p, 0)) * x / (x + y)
+        return none * pot + (total - none) * (pot + risk) + total * extra - (1.0 - none) * risk
+
+    def stack_odds(self, s, v, width):
+        eq = 1.0
+        more = 0
+        for p in s.active:
+            if p != s.hero:
+                behind = v.bets.get(p, 0) < v.level
+                if not behind or v.labels.get(p) in _RAISED:
+                    eq *= allin_eq(s.hole, width(p))
+                    if behind:
+                        more += v.stack0 - v.bets.get(p, 0)
+        if more:
+            return eq, s.my_stack / (s.pot + s.my_stack + more)
+        return eq, s.to_call / (s.pot + s.to_call)
 
     def rto(self, s, to):
         if not _raisable(s):
@@ -992,11 +1034,7 @@ class ChartBot(Rival):
         return 0.04 if v.labels.get(p) in ("calljam", "call4") else self.jam_range[min(len(v.raises), 3) - 1]
 
     def vs_jam(self, s, v, key):
-        eq = 1.0
-        for p in s.active:
-            if p != s.hero and v.bets.get(p, 0) >= v.level:
-                eq *= allin_eq(s.hole, self.jam_width(s, v, p))
-        need = s.to_call / (s.pot + s.to_call)
+        eq, need = self.stack_odds(s, v, lambda p: self.jam_width(s, v, p))
         if eq >= need + 0.02:
             return self.jam(s) if eq >= need + 0.08 else Action("call")
         return Action("fold")
@@ -1097,8 +1135,8 @@ class Lag(ChartBot):
         c = self.stats.c
         for p in s.active:
             if p != s.hero:
-                n = c.get((p, "vb", 1), 0) + c.get((p, "vb", 2), 0) + c.get((p, "vb", 3), 0)
-                f = c.get((p, "vb_f", 1), 0) + c.get((p, "vb_f", 2), 0) + c.get((p, "vb_f", 3), 0)
+                n = sum(c.get((p, "vb", st, pr), 0) for st in (1, 2, 3) for pr in (False, True))
+                f = sum(c.get((p, "vb_f", st, pr), 0) for st in (1, 2, 3) for pr in (False, True))
                 if n >= 10 and f < 0.25 * n:
                     return False
         return True
@@ -1153,9 +1191,10 @@ class Adaptive(ChartBot):
         rate = self.stats.rate
         if kind == "bet":
             return rate((p, "nb_b", st, init), (p, "nb", st, init), prior, 5.0)
+        pr = any(q == p for q, _ in self.view.raises)
         if kind == "raise":
-            return rate((p, "vb_r", st), (p, "vb", st), prior, 8.0)
-        return rate((p, "vb_f", st), (p, "vb", st), prior, 5.0)
+            return rate((p, "vb_r", st, pr), (p, "vb", st, pr), prior, 6.0)
+        return rate((p, "vb_f", st, pr), (p, "vb", st, pr), prior, 4.0)
 
     def group(self, s, v, p):
         if p == v.sbp:
@@ -1200,7 +1239,16 @@ class Adaptive(ChartBot):
             return clamp(self.stats.rate((p, "fj_c"), (p, "fj"), 0.04, 8.0), 0.015, 1.0)
         return self.width(v, p)
 
+    def pressure(self, p):
+        return self.stats.rate((p, "f3_f"), (p, "f3"), 0.6, 4.0) >= 0.35
+
+    def pays_off(self, s):
+        c = self.stats.c
+        return any(c.get((p, "fj_c"), 0) >= 2 for p in s.active if p != s.hero)
+
     def unopened(self, s, v, key):
+        if self.pays_off(s) and self.jam_ev(s, v) > 10 * v.bb:
+            return self.jam(s)
         a = ChartBot.unopened(self, s, v, key)
         rate = self.stats.rate
         pf = 1.0
@@ -1226,6 +1274,8 @@ class Adaptive(ChartBot):
         return a
 
     def vs_open(self, s, v, key):
+        if self.pays_off(s) and self.jam_ev(s, v) > 10 * v.bb:
+            return self.jam(s)
         a = ChartBot.vs_open(self, s, v, key)
         opener, level = v.raises[-1]
         if level > 6 * v.bb:
@@ -1248,6 +1298,9 @@ class Adaptive(ChartBot):
     def reraised(self, s, v, key, default):
         raiser, level = v.raises[-1]
         w = self.width(v, raiser)
+        if len({q for q, _ in v.raises if q != s.hero and q in s.active}) > 1:
+            eq, need = self.stack_odds(s, v, lambda p: self.jam_width(s, v, p))
+            return self.jam(s) if eq >= need + 0.05 else Action("fold")
         if w < 0.09:
             return default(self, s, v, key)
         eq = allin_eq(s.hole, w)
@@ -1280,17 +1333,21 @@ class Adaptive(ChartBot):
         if eq >= 0.8 and (st < 3 or not ip):
             best_ev += 0.45 * pot * max(self.freq(p, "bet", st, p == v.init) for p in foes)
         reraise = max(self.freq(p, "raise", st, False) for p in foes)
-        for frac in (0.4, 0.75, 1.2):
+        called = {q for q, _, kind, _, _ in v.acts if kind == "call"}
+        for frac in (0.4, 0.75, 1.2, 2.0):
             b = min(frac * pot, s.my_stack)
             pf = 1.0
             for p in foes:
-                pf *= clamp(self.freq(p, "fold", st, False) * (b / (pot + b) / 0.4) ** 0.6, 0.02, 0.95)
+                ff = self.freq(p, "fold", st, False) * (b / (pot + b) / 0.4) ** 0.4
+                pf *= clamp(ff * (0.75 if p in called else 1.0), 0.02, 0.95)
             fbar = pf ** (1.0 / nv)
             eqc = clamp((eq - fbar) / (1.0 - fbar), 0.7 * eq if outs >= 8 else 0.04, 1.0)
+            if frac > 1.0 and eqc < 0.6:
+                break
             ev = pf * pot + (1.0 - pf) * (eqc * (pot + 2.0 * b) - b)
             if eqc < 0.75:
                 ev -= (1.0 - pf) * reraise * 0.4 * b
-            if ev > best_ev + 0.03 * pot:
+            if ev > best_ev + (0.03 if eqc >= 0.5 else 0.1) * pot:
                 best, best_ev = frac, ev
         return self.bet(s, best) if best else Action("check")
 
@@ -1421,49 +1478,21 @@ class Shover(Rival):
     track = True
 
     def pre(self, s, v):
-        rate = self.stats.rate
-        me = s.hero
-        hole = s.hole
-        pot = s.pot
         if v.raises and (v.level >= v.jam or s.to_call >= 0.3 * s.my_stack):
-            eq = 1.0
-            for p in s.active:
-                if p != me and v.bets.get(p, 0) >= v.level:
-                    lab = v.labels.get(p)
-                    if lab == "jam":
-                        w = rate((p, "jam"), (p, "hands"), 0.03, 12.0)
-                    elif lab == "calljam":
-                        w = rate((p, "fj_c"), (p, "fj"), 0.04, 6.0)
-                    else:
-                        w = 0.03
-                    eq *= allin_eq(hole, max(0.012, w))
-            if eq >= s.to_call / (pot + s.to_call) + 0.03:
-                return self.jam(s)
-            return Action("fold")
-        risk = s.my_stack
-        none = total = 1.0
-        extra = 0.0
-        for p in s.active:
-            if p == me:
-                continue
-            c = rate((p, "fj_c"), (p, "fj"), 0.035, 5.0)
-            lab = v.labels.get(p)
-            if lab in ("open", "3bet", "4bet"):
-                base = rate((p, "pfr"), (p, "hands"), 0.15, 10.0)
-            elif lab in ("limp", "call", "limpcall", "call3"):
-                base = rate((p, "vpip"), (p, "hands"), 0.25, 10.0)
-            else:
-                base = 1.0
-            pc = min(1.0, c / max(base, 0.02))
-            x = pc * allin_eq(hole, max(0.012, min(c, base)))
-            y = 1.0 - pc
-            none *= y
-            total *= x + y
-            extra += (v.stack0 - v.bets.get(p, 0)) * x / (x + y)
-        ev = none * pot + (total - none) * (pot + risk) + total * extra - (1.0 - none) * risk
-        if _raisable(s) and ev > (0.4 * pot if not s.to_call else 0.0) + 0.25 * v.bb:
+            eq, need = self.stack_odds(s, v, lambda p: self.shown(v, p))
+            return self.jam(s) if eq >= need + 0.03 else Action("fold")
+        if _raisable(s) and self.jam_ev(s, v) > (0.4 * s.pot if not s.to_call else 0.0) + 0.25 * v.bb:
             return self.jam(s)
         return Action("fold") if s.to_call else Action("check")
+
+    def shown(self, v, p):
+        rate = self.stats.rate
+        lab = v.labels.get(p)
+        if lab == "jam":
+            return max(0.012, rate((p, "jam"), (p, "hands"), 0.03, 12.0))
+        if lab == "calljam":
+            return max(0.012, rate((p, "fj_c"), (p, "fj"), 0.04, 6.0))
+        return 0.03
 
     def post(self, s, v):
         cls = made(s.hole, s.board)

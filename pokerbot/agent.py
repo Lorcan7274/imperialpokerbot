@@ -72,8 +72,8 @@ class Agent:
     BANK = 8.0
     OVERHEAD = 0.0008
     LIMIT = 0.004
-    REFERENCE = 0.00026
-    TARGET = 0.0015
+    REFERENCE = 0.00018
+    TARGET = 0.0012
     CALIBRATE = True
 
     def __init__(self):

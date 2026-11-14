@@ -1,3 +1,5 @@
+from time import perf_counter
+
 RANKS = "23456789TJQKA"
 SUITS = "cdhs"
 
@@ -91,9 +93,12 @@ def _rank_value(key):
     return TOP5[mask]
 
 
+_STOP = perf_counter() + 0.4
+
+
 def _warm(r, left, key):
     if r == 13:
-        if left <= 2:
+        if left <= 2 and perf_counter() < _STOP:
             _CACHE[key] = _rank_value(key)
         return
     for k in range(min(4, left) + 1):

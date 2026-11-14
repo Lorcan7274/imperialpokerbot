@@ -17,6 +17,27 @@ def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
 
 
+STRONG_ALL = [(a, b) for a in range(52) for b in range(a)
+              if a >> 2 == b >> 2 or a >> 2 >= 11 or b >> 2 >= 11]
+
+
+def strong_river_equity(hole, board):
+    board = list(board)
+    dead = set(hole) | set(board)
+    hv = evaluate(list(hole) + board)
+    won = tot = 0.0
+    for x, y in STRONG_ALL:
+        if x in dead or y in dead:
+            continue
+        v = evaluate([x, y] + board)
+        tot += 1.0
+        if hv > v:
+            won += 1.0
+        elif hv == v:
+            won += 0.5
+    return won / tot if tot else 0.5
+
+
 def floor_for(f, noise):
     return noise * f / (noise * f + 1 - noise)
 
@@ -170,10 +191,8 @@ class Bot:
                 return None
             if len(hot) >= 2:
                 return Action("raise", s.max_raise_to) if CLONE2[name] >= 0.38 else Action("fold")
-            if e1 >= 0.62:
-                return Action("raise", s.max_raise_to)
             c = s.to_call
-            if ((e1 >= 0.36 and c <= 0.07 * stack) or (e1 >= 0.45 and c <= 0.15 * stack)
+            if (e1 >= 0.62 or (e1 >= 0.36 and c <= 0.07 * stack) or (e1 >= 0.45 and c <= 0.15 * stack)
                     or (e1 >= 0.52 and c <= 0.3 * stack)):
                 return Action("call")
             return Action("fold")
@@ -328,12 +347,17 @@ class Bot:
                 return Action("fold")
             eq_with = lambda mults=None: sim_equity(sim, mults)
         eq = eq_with()
+        pure = all(roles.get(v) for v in ranges)
+        if st == 3 and len(rl) == 1 and "strong" in roles.values():
+            eq = strong_river_equity(s.hole, s.board)
         ip = self._in_position(s)
         can_raise = s.max_raise_to > s.my_bet + c and any(
             s.stacks.get(v, 1) > 0 for v in ranges)
         most = s.max_raise_to - s.my_bet
         barrel = "strong" in roles.values()
         soft = "weak" in roles.values()
+        # a starter bot that has raised never folds and bets every street, so the stack goes in on the river
+        wait = barrel and st < 3 and s.my_stack > P
         tag = {v: line(v, 1, ctx["agg"], ctx["stuck"], ctx["checked"]) for v in ranges}
 
         def response(sit, chips, x, ref):
@@ -362,7 +386,7 @@ class Bot:
         if c <= 0:
             real = (1.0 if ip else 0.93) if st == 3 else (0.95 if ip else 0.85)
             best, best_ev = Action("check"), eq * P * real
-            if not can_raise:
+            if not can_raise or wait:
                 return best
             fr = risk("p_vs_bet")
             floor = 2 * bb + 5
@@ -394,7 +418,7 @@ class Bot:
             real = 0.96 if ip else 0.90
         ev_call = eq * real * (P + c) - c
         best, best_ev = (Action("call"), ev_call) if ev_call > 0 else (Action("fold"), 0.0)
-        if can_raise:
+        if can_raise and not wait:
             rr = risk("p_vs_raise")
             for frac in (0.6, 1.0, 1e9):
                 if self._late():
@@ -407,7 +431,7 @@ class Bot:
                 ev = phi * P + (1 - phi) * (eqc * (P + 2 * a - c) - a)
                 if eqc < 0.8 and a < s.my_stack:
                     ev -= (1 - phi) * rr * a * 0.5
-                if ev > best_ev + 0.15 * P:
+                if ev > best_ev + (0.02 if pure else 0.15) * P:
                     best, best_ev = Action("raise", s.my_bet + a), ev
                 if a >= most or (frac >= 1.0 and not barrel and (eqc < 0.6 or best.kind != "raise")):
                     break
