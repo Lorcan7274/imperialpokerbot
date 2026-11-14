@@ -868,6 +868,13 @@ class Model:
         return (n >= 2 and self.rfit[p] * 8 >= n * 7 and self.badshow[p] < 3
                 and self.viol[p] <= 3 + 0.01 * self.acts[p])
 
+    def sticky(self, p):
+        opp = fold = 0
+        for tag in ("", ":a", ":s", ":k"):
+            opp += self.opp[(p, "p_vs_bet" + tag)]
+            fold += self.cnt[(p, "p_vs_bet" + tag, "fold")]
+        return opp >= 12 and fold <= 0.25 * opp
+
     def freq(self, player, sit, act, n=2):
         prior = PRIORS[(sit, act)][0 if n <= 2 else 1]
         k = 4.0 if sit == "jam" or sit[1] == "_" else self.strength
@@ -1438,6 +1445,7 @@ class Bot:
         soft = "weak" in roles.values()
         # a starter bot that has raised never folds and bets every street, so the stack goes in on the river
         wait = barrel and st < 3 and s.my_stack > P
+        big = barrel or all(roles.get(v) or self.model.sticky(v) for v in ranges)
         tag = {v: line(v, 1, ctx["agg"], ctx["stuck"], ctx["checked"]) for v in ranges}
 
         def response(sit, chips, x, ref):
@@ -1472,7 +1480,7 @@ class Bot:
             floor = 2 * bb + 5
             sizes = ([2 * bb, floor] if soft else []) + [max(f * P, floor) for f in (0.33, 0.7, 1.1)]
             thin = len(sizes) - 1
-            sizes += [1e9] if barrel else [2.2 * P, 1e9]
+            sizes += [1e9] if barrel else [2.2 * P, 1e9] if big else []
             for k, size in enumerate(sizes):
                 if self._late():
                     break
@@ -1500,7 +1508,7 @@ class Bot:
         best, best_ev = (Action("call"), ev_call) if ev_call > 0 else (Action("fold"), 0.0)
         if can_raise and not wait:
             rr = risk("p_vs_raise")
-            for frac in (0.6, 1.0, 1e9):
+            for frac in (0.6, 1.0, 1e9) if big else (0.6, 1.0):
                 if self._late():
                     break
                 a = c + frac * (P + c)
@@ -1582,11 +1590,12 @@ def workload():
 
 class Agent:
     BANK = 8.0
-    OVERHEAD = 0.0008
+    OVERHEAD = 0.0018
     LIMIT = 0.004
-    REFERENCE = 0.00018
-    TARGET = 0.0012
+    REFERENCE = 0.0003
+    TARGET = 0.002
     CALIBRATE = True
+    REPORT = False
 
     def __init__(self):
         self.bot = Bot()
@@ -1595,13 +1604,20 @@ class Agent:
         self.hands = 1000
         self.speed = 1.0
         self.heavy = self.TARGET
+        self.seen = {"cal": 0.0, "clock": 0.0, "end": 0.0, "endmax": 0.0, "late": 0, "told": False,
+                     False: [0, 0.0, 0.0], True: [0, 0.0, 0.0], "hist": [0] * 8}
 
     def on_table_start(self, info):
         self.hands = info.get("hands", 1000)
         if not self.CALIBRATE:
             return
         try:
-            self.speed = min(1.0, max(0.15, self.REFERENCE / workload()))
+            self.seen["cal"] = cal = workload()
+            t = time.perf_counter()
+            for _ in range(200):
+                time.perf_counter()
+            self.seen["clock"] = (time.perf_counter() - t) / 200
+            self.speed = min(1.0, max(0.15, self.REFERENCE / cal))
             gc.collect()
             gc.freeze()
             gc.disable()
@@ -1630,13 +1646,36 @@ class Agent:
             out = {"action": "check" if "check" in legal else "fold"}
         dt = time.perf_counter() - t
         self.spent += dt + self.OVERHEAD
-        if self.CALIBRATE and dt > 0.0004:
+        post = bool(state.get("board"))
+        if self.CALIBRATE and post:
             self.heavy += 0.15 * (min(dt, 3 * self.heavy) - self.heavy)
             if self.heavy > 1.5 * self.TARGET:
                 self.speed = max(0.15, self.speed * 0.9)
             elif self.heavy < 0.7 * self.TARGET:
                 self.speed = min(1.0, self.speed * 1.04)
+        seen = self.seen
+        row = seen[post]
+        row[0] += 1
+        row[1] += dt
+        row[2] = max(row[2], dt)
+        seen["late"] += dt > self.LIMIT
+        if post:
+            seen["hist"][min(7, int(dt * 1000))] += 1
+        if (self.REPORT and not seen["told"] and out["action"] in ("check", "fold")
+                and state.get("hand_number", 0) > self.hands - 20):
+            seen["told"] = True
+            raise RuntimeError(self.report())
         return out
+
+    def report(self):
+        seen = self.seen
+        pre, post = seen[False], seen[True]
+        return ("TIMING cal_ms=%.3f clock_us=%.2f speed=%.2f heavy_ms=%.2f pre n=%d sum_s=%.3f max_ms=%.2f "
+                "post n=%d sum_s=%.3f max_ms=%.2f post_ms_hist=%s over_limit=%d hand_end sum_s=%.3f max_ms=%.2f "
+                "spent=%.2f gc=%s" % (
+                    seen["cal"] * 1e3, seen["clock"] * 1e6, self.speed, self.heavy * 1e3, pre[0], pre[1],
+                    pre[2] * 1e3, post[0], post[1], post[2] * 1e3, seen["hist"], seen["late"], seen["end"],
+                    seen["endmax"] * 1e3, self.spent, gc.isenabled()))
 
     def on_hand_end(self, summary):
         t = time.perf_counter()
@@ -1648,5 +1687,8 @@ class Agent:
             pass
         if self.CALIBRATE and summary.get("hand_number", 1) % 128 == 0:
             gc.collect()
-        self.spent += time.perf_counter() - t
+        dt = time.perf_counter() - t
+        self.spent += dt
+        self.seen["end"] += dt
+        self.seen["endmax"] = max(self.seen["endmax"], dt)
 

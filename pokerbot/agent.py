@@ -70,10 +70,10 @@ def workload():
 
 class Agent:
     BANK = 8.0
-    OVERHEAD = 0.0008
+    OVERHEAD = 0.0018
     LIMIT = 0.004
-    REFERENCE = 0.00018
-    TARGET = 0.0012
+    REFERENCE = 0.0003
+    TARGET = 0.002
     CALIBRATE = True
     REPORT = False
 
