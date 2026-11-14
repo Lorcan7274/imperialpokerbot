@@ -904,6 +904,10 @@ class GameState:
 
 
 
+
+def connects(a, b, br):
+    return (a in br and b in br) or (a in br and br.count(a) > 1) or (b in br and br.count(b) > 1)
+
 Event = namedtuple("Event", "player street sit act jam rec fit big frac")
 
 EDGES = (0.36, 0.48, 0.58, 0.68, 0.88)
@@ -1089,7 +1093,7 @@ class Model:
         self.tell = {}
         self.jamx = {}
 
-    def observe(self, events, hero, shown=None):
+    def observe(self, events, hero, shown=None, board=None):
         seen = set()
         hot = set()
         jams = {}
@@ -1145,7 +1149,9 @@ class Model:
             if p != hero and p in seen and len(cards) == 2:
                 a, b = cards[0] >> 2, cards[1] >> 2
                 if (a == b or a >= 11 or b >= 11) != (p in hot):
-                    self.badshow[p] += 1
+                    # one starter variant also raises once both its cards pair the board or one makes trips
+                    if not (p in hot and board and connects(a, b, [c >> 2 for c in board])):
+                        self.badshow[p] += 1
                 if p in jams:
                     t = self.jamx.setdefault((p, jams[p]), [0, 0.0])
                     t[0] += 1
@@ -1264,6 +1270,22 @@ class Sample:
                            key=vals.__getitem__, reverse=True)
             hit = self._boards[len(board)] = (vals, order)
         return hit
+
+
+class Exact:
+    """An explicit list of hands, in the layout the run-out routine reads."""
+
+    def __init__(self, combos):
+        self.combos = combos
+        self.mask = [1 << a | 1 << b for a, b in combos]
+        self.rank = [RANK_KEY[a] + RANK_KEY[b] for a, b in combos]
+        self.suit = [SUIT_KEY[a] + SUIT_KEY[b] for a, b in combos]
+        self.size = len(combos)
+
+
+def connects(a, b, br):
+    # both cards pair the board, or one makes three of a kind
+    return (a in br and b in br) or (a in br and br.count(a) > 1) or (b in br and br.count(b) > 1)
 
 
 def _cut(xs, cums, total, bound, above):
@@ -1498,6 +1520,23 @@ STRONG_ALL = [(a, b) for a in range(52) for b in range(a)
               if a >> 2 == b >> 2 or a >> 2 >= 11 or b >> 2 >= 11]
 
 
+WEAK_ALL = [(a, b) for a in range(52) for b in range(a)
+            if not (a >> 2 == b >> 2 or a >> 2 >= 11 or b >> 2 >= 11)]
+
+
+def listed_equity(hole, board, combos, weights):
+    hv = evaluate(list(hole) + list(board))
+    won = tot = 0.0
+    for (x, y), w in zip(combos, weights):
+        v = evaluate([x, y] + list(board))
+        tot += w
+        if hv > v:
+            won += w
+        elif hv == v:
+            won += 0.5 * w
+    return won / tot if tot else 0.5
+
+
 def strong_river_equity(hole, board):
     board = list(board)
     dead = set(hole) | set(board)
@@ -1573,6 +1612,7 @@ class Bot:
         self._hist = []
         self._hero = None
         self._bb = 20
+        self._hits = {}
         self.seats = 0
 
     def decide(self, s):
@@ -1603,7 +1643,7 @@ class Bot:
     def _commit(self, shown=None, board=None):
         if self._hist:
             events = classify(self._hist, self._bb, n=self.seats)
-            self.model.observe(events, self._hero, shown)
+            self.model.observe(events, self._hero, shown, board)
             if shown and board and self.TELLS:
                 self._learn(events, shown, board)
         self._hist = []
@@ -1670,17 +1710,34 @@ class Bot:
 
     def _roles(self, s, events):
         roles = {}
+        self._hits = {}
         for v in s.active:
             if v != s.hero and self.model.is_clone(v):
                 role = None
                 for e in events:
                     if e.player == v:
                         if e.act == "raise" or (e.act == "call" and e.big):
+                            # a first raise after the flop from a hand that only limped is a board hit, not a big pair
+                            if role != "strong" and e.street:
+                                self._hits[v] = e.street
                             role = "strong"
                         elif role is None and e.act in ("check", "call"):
                             role = "weak"
                 roles[v] = role
         return roles
+
+    def _hit_range(self, s, v):
+        # the starter variant's range once it wakes up after the flop: weak hands that hit the board hard,
+        # plus the few real raising hands that missed their raise before the flop on a timeout
+        dead = set(s.hole) | set(s.board)
+        br = [c >> 2 for c in s.board[:BOARD_LEN[self._hits[v]]]]
+        hit = [(a, b) for a, b in WEAK_ALL
+               if a not in dead and b not in dead and connects(a >> 2, b >> 2, br)]
+        if not hit:
+            return None
+        late = [xy for xy in STRONG_ALL[::8] if xy[0] not in dead and xy[1] not in dead]
+        slow = max(0.001, self.model.viol[v] / max(1, self.model.acts[v]))
+        return hit + late, [1.0] * len(hit) + [12.6 * slow * len(hit) / max(1, len(late))] * len(late)
 
     def _update(self, w, e, s, n, sample):
         f = lambda act: self.model.freq(e.player, e.sit, act, n)
@@ -1740,7 +1797,13 @@ class Bot:
             if v == s.hero:
                 continue
             role = roles.get(v)
-            if role == "strong":
+            if role == "strong" and v in self._hits:
+                br = [c >> 2 for c in s.board[:BOARD_LEN[self._hits[v]]]]
+                w = [0.0 if k else x * connects(xy[0] >> 2, xy[1] >> 2, br)
+                     for x, k, xy in zip(sample.base, sample.strong, sample.combos)]
+                if not any(w):
+                    w = [x if k else 0.0 for x, k in zip(sample.base, sample.strong)]
+            elif role == "strong":
                 w = [x if k else 0.0 for x, k in zip(sample.base, sample.strong)]
             elif role == "weak":
                 w = [0.0 if k else x for x, k in zip(sample.base, sample.strong)]
@@ -1758,7 +1821,7 @@ class Bot:
             out[v] = w
         return out
 
-    def _river_plan(self, s, w):
+    def _river_plan(self, s, w, hands=None):
         # value of calling a raising starter bot down to the river, where it pays off a shove with its whole range
         bb = s.big_blind
         board = list(s.board)
@@ -1789,7 +1852,7 @@ class Bot:
             stack -= turn
             cost += turn
         bet = min(stack, bb + pot // 2)
-        eqs = runout_equity(s.hole, board, runs, self._sample, w, self.deadline)
+        eqs = runout_equity(s.hole, board, runs, hands or self._sample, w, self.deadline)
         if len(eqs) < 6:
             return None
         total = 0.0
@@ -2065,7 +2128,11 @@ class Bot:
                 and all(roles.get(v) for v in ranges)):
             if c <= 0:
                 return Action("check")
-            ev = self._river_plan(s, ranges[raisers[0]])
+            listed = self._hit_range(s, raisers[0]) if raisers[0] in self._hits else None
+            if listed:
+                ev = self._river_plan(s, listed[1], Exact(listed[0]))
+            else:
+                ev = self._river_plan(s, ranges[raisers[0]])
             if ev is None:
                 return self._quick(s)
             return Action("call") if ev > 0 else Action("fold")
@@ -2081,7 +2148,8 @@ class Bot:
         eq = eq_with()
         pure = all(roles.get(v) for v in ranges)
         if st == 3 and len(rl) == 1 and "strong" in roles.values():
-            eq = strong_river_equity(s.hole, s.board)
+            listed = self._hit_range(s, raisers[0]) if raisers and raisers[0] in self._hits else None
+            eq = listed_equity(s.hole, s.board, *listed) if listed else strong_river_equity(s.hole, s.board)
         ip = self._in_position(s)
         can_raise = s.max_raise_to > s.my_bet + c and any(
             s.stacks.get(v, 1) > 0 for v in ranges)

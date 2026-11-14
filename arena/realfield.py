@@ -19,6 +19,26 @@ class KitStarter(Base):
         return Action("fold")
 
 
+class KitVariant(Base):
+    """The starter bot as one team changed it: it also raises once both cards pair the board or one makes trips,
+    and it loses about one action in fifty to a timeout."""
+
+    def decide(self, s):
+        if self.rng.random() < 0.02:
+            return Action("check") if s.to_call <= 0 else Action("fold")
+        a, b = (c >> 2 for c in s.hole)
+        br = [c >> 2 for c in s.board]
+        strong = a == b or max(a, b) >= 11 or (a in br and b in br) or (
+            a in br and br.count(a) > 1) or (b in br and br.count(b) > 1)
+        if strong and s.max_raise_to > s.my_bet + s.to_call:
+            return Action("raise", min(s.min_raise_to + s.pot // 2, s.max_raise_to))
+        if s.to_call <= 0:
+            return Action("check")
+        if s.to_call <= 2 * s.big_blind or strong:
+            return Action("call")
+        return Action("fold")
+
+
 class TightIso(Base):
     """Tight bot that isolates limpers and value-bets, modelled on the round-one winners."""
     open_to = 70
@@ -260,5 +280,5 @@ class RealEE(SizeTell):
         return Action("call") if frac < 0.4 and self.rng.random() < 0.5 else Action("fold")
 
 
-REAL = {"kit_starter0": KitStarter, "tight_a": TightIso, "tight_b": TightIsoB,
+REAL = {"kit_starter0": KitStarter, "kit_variant": KitVariant, "tight_a": TightIso, "tight_b": TightIsoB,
         "real_cpcf": RealCPCF, "real_gg": RealGamesGone, "real_ee": RealEE, "real_mohil": RealMohil}

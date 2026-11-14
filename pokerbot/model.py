@@ -2,6 +2,10 @@ from collections import defaultdict, namedtuple
 
 from .preflop import percentile
 
+
+def connects(a, b, br):
+    return (a in br and b in br) or (a in br and br.count(a) > 1) or (b in br and br.count(b) > 1)
+
 Event = namedtuple("Event", "player street sit act jam rec fit big frac")
 
 EDGES = (0.36, 0.48, 0.58, 0.68, 0.88)
@@ -187,7 +191,7 @@ class Model:
         self.tell = {}
         self.jamx = {}
 
-    def observe(self, events, hero, shown=None):
+    def observe(self, events, hero, shown=None, board=None):
         seen = set()
         hot = set()
         jams = {}
@@ -243,7 +247,9 @@ class Model:
             if p != hero and p in seen and len(cards) == 2:
                 a, b = cards[0] >> 2, cards[1] >> 2
                 if (a == b or a >= 11 or b >= 11) != (p in hot):
-                    self.badshow[p] += 1
+                    # one starter variant also raises once both its cards pair the board or one makes trips
+                    if not (p in hot and board and connects(a, b, [c >> 2 for c in board])):
+                        self.badshow[p] += 1
                 if p in jams:
                     t = self.jamx.setdefault((p, jams[p]), [0, 0.0])
                     t[0] += 1

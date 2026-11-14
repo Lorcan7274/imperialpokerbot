@@ -90,6 +90,22 @@ class Sample:
         return hit
 
 
+class Exact:
+    """An explicit list of hands, in the layout the run-out routine reads."""
+
+    def __init__(self, combos):
+        self.combos = combos
+        self.mask = [1 << a | 1 << b for a, b in combos]
+        self.rank = [RANK_KEY[a] + RANK_KEY[b] for a, b in combos]
+        self.suit = [SUIT_KEY[a] + SUIT_KEY[b] for a, b in combos]
+        self.size = len(combos)
+
+
+def connects(a, b, br):
+    # both cards pair the board, or one makes three of a kind
+    return (a in br and b in br) or (a in br and br.count(a) > 1) or (b in br and br.count(b) > 1)
+
+
 def _cut(xs, cums, total, bound, above):
     lo, hi = 0, len(xs)
     while lo < hi:
