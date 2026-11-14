@@ -1,3 +1,6 @@
+from itertools import accumulate
+from time import perf_counter
+
 from .cards import evaluate
 from .preflop import COMBO_PCT, COMBOS, NCOMBO
 
@@ -19,6 +22,7 @@ class Sample:
         self.base = [1.0 / _Q[i] for i in idx]
         pct = [COMBO_PCT[i] for i in idx]
         self.size = len(idx)
+        self.strong = [a >> 2 == b >> 2 or a >> 2 >= 11 or b >> 2 >= 11 for a, b in self.combos]
         self.pre_order = sorted(range(self.size), key=pct.__getitem__)
         self._boards = {}
 
@@ -69,7 +73,7 @@ def keep_top(w, order, hi, floor):
     return mult
 
 
-def simulate(hero, board, sample, ranges, trials, rng):
+def simulate(hero, board, sample, ranges, trials, rng, deadline=None):
     hero = list(hero)
     board = list(board)
     dead = set(hero) | set(board)
@@ -80,28 +84,32 @@ def simulate(hero, board, sample, ranges, trials, rng):
     idx = range(sample.size)
     picks = []
     for w in ranges:
-        cum = []
-        t = 0.0
-        for x in w:
-            t += x
-            cum.append(t)
-        if t <= 0:
-            cum = None
-        picks.append(rng.choices(idx, cum_weights=cum, k=trials))
+        cum = list(accumulate(w))
+        picks.append(rng.choices(idx, cum_weights=cum if cum and cum[-1] > 0 else None, k=trials))
     rnd = rng.random
     out = []
     for t in range(trials):
-        chosen = [p[t] for p in picks]
+        if deadline and t & 7 == 7 and perf_counter() > deadline:
+            break
+        chosen = []
         used = set()
-        clash = False
-        for i in chosen:
+        for p in picks:
+            i = p[t]
             a, b = combos[i]
             if a in used or b in used:
-                clash = True
-                break
+                # a hand sharing a card with an earlier opponent is redrawn from the same range
+                for k in (t - 1, t - 2, t - 3):
+                    i = p[k]
+                    a, b = combos[i]
+                    if a not in used and b not in used:
+                        break
+                else:
+                    chosen = None
+                    break
             used.add(a)
             used.add(b)
-        if clash:
+            chosen.append(i)
+        if chosen is None:
             continue
         full = board
         if need:

@@ -1,13 +1,16 @@
 import random
+from time import perf_counter
 
-from .model import Model, classify
 from .cards import evaluate
-from .preflop import percentile
+from .clone_table import CLONE1, CLONE2
+from .model import Model, classify
+from .preflop import class_name, percentile
 from .ranges import Sample, keep_top, narrow, river_equity, sim_equity, simulate
 from .state import Action
 
 FLOOR = {1: 0.25, 2: 0.18, 3: 0.10}
 BOARD_LEN = {1: 3, 2: 4, 3: 5}
+MAX_EVENTS = 8
 
 
 def clamp(x, lo, hi):
@@ -15,13 +18,15 @@ def clamp(x, lo, hi):
 
 
 class Bot:
-    def __init__(self, seed=None, trials=160, strict=False, samples=260):
+    def __init__(self, seed=None, trials=90, strict=False, samples=160):
         self.rng = random.Random(seed)
         self.trials = trials
         self.samples = samples
-        self._sample = None
+        self.scale = 1.0
+        self.deadline = None
         self.strict = strict
         self.model = Model()
+        self._sample = None
         self._hand = None
         self._hist = []
         self._hero = None
@@ -40,7 +45,7 @@ class Bot:
         except Exception:
             if self.strict:
                 raise
-            a = Action("check")
+            a = Action("fold")
         return self._legal(s, a)
 
     def end_hand(self, history=None, showdown=None):
@@ -53,14 +58,20 @@ class Bot:
             self.model.observe(classify(self._hist, self._bb), self._hero)
         self._hist = []
 
+    def _late(self):
+        return self.deadline is not None and perf_counter() > self.deadline
+
+    def _trials(self, opponents):
+        return max(16, int(self.trials * self.scale * min(1.0, 3.0 / (1 + opponents))))
+
     def _legal(self, s, a):
         can_raise = s.max_raise_to > s.my_bet + s.to_call
         if a.kind == "raise" and can_raise:
             amt = int(round(a.amount))
             return Action("raise", int(clamp(amt, s.min_raise_to, s.max_raise_to)))
-        if a.kind == "fold" and s.to_call > 0:
-            return Action("fold")
-        return Action("call") if s.to_call > 0 else Action("check")
+        if s.to_call <= 0:
+            return Action("check")
+        return Action("call") if a.kind in ("call", "raise") else Action("fold")
 
     def _raise(self, s, to):
         if to >= 0.4 * (s.my_stack + s.my_bet):
@@ -70,6 +81,20 @@ class Bot:
     def _in_position(self, s):
         live = [p for p in s.players if p in s.active]
         return bool(live) and live[-1] == s.hero
+
+    def _roles(self, s, events):
+        roles = {}
+        for v in s.active:
+            if v != s.hero and self.model.is_clone(v):
+                role = None
+                for e in events:
+                    if e.player == v:
+                        if e.act == "raise" or (e.act == "call" and e.big):
+                            role = "strong"
+                        elif role is None and e.act in ("check", "call"):
+                            role = "weak"
+                roles[v] = role
+        return roles
 
     def _update(self, w, e, s, n, sample):
         f = lambda act: self.model.freq(e.player, e.sit, act, n)
@@ -95,24 +120,76 @@ class Bot:
         elif e.act == "call":
             narrow(w, order, f("raise"), 1 - f("fold"), 0.5, 0.05)
 
-    def _ranges(self, s, events):
+    def _ranges(self, s, events, roles):
         if self._sample is None:
-            self._sample = Sample(s.hole, self.rng, self.samples)
+            self._sample = Sample(s.hole, self.rng, max(70, int(self.samples * self.scale)))
         sample = self._sample
         n = len(s.players)
         vals = sample.board(s.board)[0] if s.board else None
+        seen = {}
+        for e in events:
+            seen.setdefault(e.player, []).append(e)
         out = {}
         for v in s.active:
             if v == s.hero:
                 continue
-            w = list(sample.base)
-            for e in events:
-                if e.player == v:
-                    self._update(w, e, s, n, sample)
+            role = roles.get(v)
+            if role == "strong":
+                w = [x if k else 0.0 for x, k in zip(sample.base, sample.strong)]
+            elif role == "weak":
+                w = [0.0 if k else x for x, k in zip(sample.base, sample.strong)]
+            else:
+                w = list(sample.base)
+                mine = seen.get(v, ())
+                if len(mine) > MAX_EVENTS:
+                    mine = mine[:3] + mine[3 - MAX_EVENTS:]
+                if not self._late():
+                    for e in mine:
+                        self._update(w, e, s, n, sample)
             if vals:
                 w = [0.0 if vals[i] < 0 else x for i, x in enumerate(w)]
             out[v] = w
         return out
+
+    def _preflop_clone(self, s, events, raises, villains, clones, n):
+        bb = s.big_blind
+        name = class_name(*s.hole)
+        e1 = CLONE1[name]
+        stack = s.my_stack + s.my_bet
+        hot = {e.player for e in events
+               if e.player in clones and (e.act == "raise" or (e.act == "call" and e.big))}
+        hot = [v for v in hot if v in s.active]
+        if hot:
+            if any(e.player not in clones and e.player != s.hero for e in raises):
+                return None
+            if len(hot) >= 2:
+                return Action("raise", s.max_raise_to) if CLONE2[name] >= 0.38 else Action("fold")
+            if e1 >= 0.62:
+                return Action("raise", s.max_raise_to)
+            c = s.to_call
+            if ((e1 >= 0.36 and c <= 0.07 * stack) or (e1 >= 0.45 and c <= 0.15 * stack)
+                    or (e1 >= 0.52 and c <= 0.3 * stack)):
+                return Action("call")
+            return Action("fold")
+        if raises:
+            return None
+        acted = {e.player for e in events}
+        behind = [v for v in villains if v not in acted]
+        limpers = [e.player for e in events if e.act == "call"]
+        if not any(v in clones for v in behind + limpers):
+            return None
+        ok = 1.0
+        for v in behind:
+            ok *= 0.664 if v in clones else self.model.freq(v, "vs_raise", "fold", n)
+        for v in limpers:
+            if v not in clones:
+                ok *= self.model.freq(v, "vs_raise", "fold", n)
+        level = s.my_bet + s.to_call
+        to = level + 2 * bb
+        gain = s.pot + 2 * bb * sum(1 for v in limpers if v in clones)
+        if e1 >= 0.36 or ok * gain > (1 - ok) * to:
+            return Action("raise", to)
+        return Action("check") if s.to_call <= 0 else Action("fold")
 
     def _preflop(self, s):
         bb = s.big_blind
@@ -126,12 +203,21 @@ class Bot:
         freq = self.model.freq
         rnd = self.rng.random
 
+        clones = {v for v in villains if self.model.is_clone(v)}
+        if clones:
+            a = self._preflop_clone(s, events, raises, villains, clones, n)
+            if a is not None:
+                return a
+
         if raises and (s.to_call >= 0.3 * s.my_stack or raises[-1].jam or level >= 25 * bb):
-            ranges = self._ranges(s, events)
+            ranges = self._ranges(s, events, self._roles(s, events))
             committed = [w for v, w in ranges.items()
                          if any(e.player == v and e.act in ("raise", "call") for e in events)]
-            sim = simulate(s.hole, [], self._sample, committed or list(ranges.values()),
-                           self.trials, self.rng)
+            against = committed or list(ranges.values())
+            sim = simulate(s.hole, [], self._sample, against, self._trials(len(against)),
+                           self.rng, self.deadline)
+            if not sim:
+                return Action("fold")
             eq = sim_equity(sim)
             if eq * (s.pot + s.to_call) - s.to_call > 0.04 * s.pot:
                 if eq > 0.62:
@@ -214,8 +300,10 @@ class Bot:
 
     def _postflop(self, s):
         n = len(s.players)
-        events = classify(s.history, s.big_blind)
-        ranges = self._ranges(s, events)
+        bb = s.big_blind
+        events = classify(s.history, bb)
+        roles = self._roles(s, events)
+        ranges = self._ranges(s, events, roles)
         sample = self._sample
         rl = list(ranges.values())
         st = s.street
@@ -227,59 +315,92 @@ class Bot:
             hv = evaluate(list(s.hole) + list(s.board))
             eq_with = lambda mults=None: river_equity(hv, vals, rl, mults)
         else:
-            sim = simulate(s.hole, s.board, sample, rl, self.trials, self.rng)
+            sim = simulate(s.hole, s.board, sample, rl, self._trials(len(rl)), self.rng,
+                           self.deadline)
+            if not sim:
+                return Action("fold")
             eq_with = lambda mults=None: sim_equity(sim, mults)
         eq = eq_with()
         ip = self._in_position(s)
         can_raise = s.max_raise_to > s.my_bet + c and any(
             s.stacks.get(v, 1) > 0 for v in ranges)
+        most = s.max_raise_to - s.my_bet
+        barrel = "strong" in roles.values()
+        soft = "weak" in roles.values()
 
-        def response(sit, x, ref):
+        def response(sit, chips, x, ref):
             phi = 1.0
             mults = []
+            exact = True
             for v, w in ranges.items():
-                ff = clamp(freq(v, sit, "fold", n) * (x / ref) ** 0.7, 0.02, 0.95)
+                role = roles.get(v)
+                if role == "strong":
+                    ff = 0.0
+                elif role == "weak":
+                    ff = 1.0 if chips > 2 * bb else 0.0
+                else:
+                    ff = clamp(freq(v, sit, "fold", n) * (x / ref) ** 0.7, 0.02, 0.95)
+                    exact = False
                 phi *= ff
-                mults.append(keep_top(w, order, 1 - ff, 0.02))
-            return phi, eq_with(mults)
+                mults.append(keep_top(w, order, 1 - ff, 0.02) if 0.0 < ff < 1.0 else None)
+            if exact or phi > 0.999:
+                return phi, eq
+            return phi, eq_with([m or [1.0] * sample.size for m in mults])
+
+        def risk(sit):
+            return max(1.0 if roles.get(v) == "strong" else 0.0 if roles.get(v) == "weak"
+                       else freq(v, sit, "raise", n) for v in ranges)
 
         if c <= 0:
             real = (1.0 if ip else 0.93) if st == 3 else (0.95 if ip else 0.85)
             best, best_ev = Action("check"), eq * P * real
             if not can_raise:
                 return best
-            fr = max(freq(v, "p_vs_bet", "raise", n) for v in ranges)
-            for frac in (0.33, 0.7, 1.1):
-                b = frac * P
+            fr = risk("p_vs_bet")
+            floor = 2 * bb + 5
+            sizes = ([2 * bb, floor] if soft else []) + [max(f * P, floor) for f in (0.33, 0.7, 1.1)]
+            if barrel:
+                sizes.append(1e9)
+            for size in sizes:
+                if self._late():
+                    break
+                b = size
                 if b >= 0.6 * s.my_stack:
                     b = s.my_stack
-                b = clamp(b, s.min_raise_to - s.my_bet, s.my_stack)
-                phi, eqc = response("p_vs_bet", b / (P + b), 0.4)
+                b = clamp(b, s.min_raise_to - s.my_bet, most)
+                phi, eqc = response("p_vs_bet", b, b / (P + b), 0.4)
                 ev = phi * P + (1 - phi) * (eqc * (P + 2 * b) - b)
-                if eqc < 0.8:
+                if eqc < 0.8 and b < s.my_stack:
                     ev -= (1 - phi) * fr * b * 0.5
                 if ev > best_ev + 0.02 * P:
                     best, best_ev = Action("raise", s.my_bet + b), ev
-                if b >= s.my_stack:
+                if b >= most:
                     break
             return best
 
-        real = 1.0 if st == 3 else (0.96 if ip else 0.90)
+        if st == 3:
+            real = 1.0
+        elif barrel:
+            real = 0.68 if st == 1 else 0.90
+        else:
+            real = 0.96 if ip else 0.90
         ev_call = eq * real * (P + c) - c
         best, best_ev = (Action("call"), ev_call) if ev_call > 0 else (Action("fold"), 0.0)
         if can_raise:
-            rr = max(freq(v, "p_vs_raise", "raise", n) for v in ranges)
-            for frac in (0.6, 1.0):
+            rr = risk("p_vs_raise")
+            for frac in (0.6, 1.0, 1e9) if barrel else (0.6, 1.0):
+                if self._late():
+                    break
                 a = c + frac * (P + c)
                 if a >= 0.6 * s.my_stack:
                     a = s.my_stack
-                a = clamp(a, s.min_raise_to - s.my_bet, s.my_stack)
-                phi, eqc = response("p_vs_raise", (a - c) / (P + a), 0.3)
+                a = clamp(a, s.min_raise_to - s.my_bet, most)
+                phi, eqc = response("p_vs_raise", a - c, (a - c) / (P + a), 0.3)
                 ev = phi * P + (1 - phi) * (eqc * (P + 2 * a - c) - a)
-                if eqc < 0.8:
+                if eqc < 0.8 and a < s.my_stack:
                     ev -= (1 - phi) * rr * a * 0.5
                 if ev > best_ev + 0.15 * P:
                     best, best_ev = Action("raise", s.my_bet + a), ev
-                if a >= s.my_stack:
+                if a >= most:
                     break
         return best
