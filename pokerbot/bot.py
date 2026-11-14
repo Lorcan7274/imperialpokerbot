@@ -3,10 +3,11 @@ from time import perf_counter
 
 from .cards import evaluate
 from .clone_table import CLONE1, CLONE2
-from .model import Model, classify, line
+from .model import Model, classify, line, tell_key
 from .preflop import class_name, percentile
-from .ranges import Sample, keep_top, narrow, river_equity, sim_equity, simulate
+from .ranges import Sample, keep_top, made, narrow, river_equity, sim_equity, simulate, strong_hand
 from .state import Action
+from .topx_table import TOPX, TOPX_GRID
 
 NOISE = {1: 0.30, 2: 0.22, 3: 0.14}
 BOARD_LEN = {1: 3, 2: 4, 3: 5}
@@ -38,6 +39,20 @@ def strong_river_equity(hole, board):
     return won / tot if tot else 0.5
 
 
+TELL_PRIOR = {"x": 0.12, "r": 0.8, 0: 0.15, 1: 0.25, 2: 0.15, 3: 0.55, 4: 0.7, 5: 0.7}
+
+
+def topx(name, x):
+    row = TOPX[name]
+    if x <= TOPX_GRID[0]:
+        return row[0]
+    for k in range(1, len(TOPX_GRID)):
+        if x <= TOPX_GRID[k]:
+            lo, hi = TOPX_GRID[k - 1], TOPX_GRID[k]
+            return row[k - 1] + (row[k] - row[k - 1]) * (x - lo) / (hi - lo)
+    return row[-1]
+
+
 def floor_for(f, noise):
     return noise * f / (noise * f + 1 - noise)
 
@@ -45,6 +60,7 @@ def floor_for(f, noise):
 class Bot:
     LIGHT3 = True
     OPEN_BB = 3.5
+    TELLS = True
 
     def __init__(self, seed=None, trials=90, strict=False, samples=160):
         self.rng = random.Random(seed)
@@ -79,15 +95,32 @@ class Bot:
                 a = Action("fold")
         return self._legal(s, a)
 
-    def end_hand(self, history=None, showdown=None):
+    def end_hand(self, history=None, showdown=None, board=None):
         if history:
             self._hist = list(history)
-        self._commit(showdown)
+        self._commit(showdown, board)
 
-    def _commit(self, shown=None):
+    def _commit(self, shown=None, board=None):
         if self._hist:
-            self.model.observe(classify(self._hist, self._bb), self._hero, shown)
+            events = classify(self._hist, self._bb)
+            self.model.observe(events, self._hero, shown)
+            if shown and board and self.TELLS:
+                self._learn(events, shown, board)
         self._hist = []
+
+    def _learn(self, events, shown, board):
+        tell = self.model.tell
+        for e in events:
+            hole = shown.get(e.player)
+            key = tell_key(e)
+            if key is None or hole is None or e.player == self._hero or len(hole) != 2:
+                continue
+            cards = board[:BOARD_LEN[e.street]]
+            if len(cards) < BOARD_LEN[e.street]:
+                continue
+            t = tell.setdefault((e.player,) + key, [0, 0])
+            t[0] += 1
+            t[1] += strong_hand(hole, cards)
 
     def _late(self):
         return self.deadline is not None and perf_counter() > self.deadline
@@ -185,6 +218,21 @@ class Bot:
             narrow(w, order, 0, fr, 1, floor_for(fr, noise * 0.6))
         elif e.act == "call":
             narrow(w, order, f("raise"), 1 - f("fold"), 0.5, 0.05)
+        key = tell_key(e)
+        if key and self.TELLS:
+            t = self.model.tell.get((e.player,) + key, (0, 0))
+            flags = sample.flags(s.board[:BOARD_LEN[e.street]])
+            tot = hit = 0.0
+            for x, k in zip(w, flags):
+                tot += x
+                if k:
+                    hit += x
+            if 0.0 < hit < tot:
+                share = hit / tot
+                q = clamp((t[1] + 2 * TELL_PRIOR[key[1]]) / (t[0] + 2), 0.02, 0.98)
+                up, down = q / share, (1 - q) / (1 - share)
+                for i, k in enumerate(flags):
+                    w[i] *= up if k else down
 
     def _ranges(self, s, events, roles):
         if self._sample is None:
@@ -274,16 +322,32 @@ class Bot:
                 return a
 
         if raises and (s.to_call >= 0.3 * s.my_stack or raises[-1].jam or level >= 25 * bb):
-            roles = self._roles(s, events)
-            ranges = self._ranges(s, events, roles)
-            committed = [w for v, w in ranges.items()
-                         if any(e.player == v and e.act in ("raise", "call") for e in events)]
-            against = committed or list(ranges.values())
-            sim = simulate(s.hole, [], self._sample, against, self._trials(len(against)),
-                           self.rng, self.deadline)
-            if not sim or (len(sim) < 12 and self._late() and not any(roles.values())):
+            name = class_name(*s.hole)
+            eq = 1.0
+            seen = False
+            faced = 0
+            for v in villains:
+                x = 1.0
+                for e in events:
+                    if e.player != v:
+                        continue
+                    if e.act == "raise":
+                        x *= freq(v, e.sit, "jam" if e.jam else "raise", n)
+                        seen = True
+                    elif e.act == "call":
+                        x *= min(1.0, freq(v, e.sit, "raise", n) + freq(v, e.sit, "call", n))
+                        seen = True
+                    else:
+                        x = 0.0
+                if x > 0.0 and x < 1.0:
+                    eq *= CLONE1[name] if v in clones else topx(name, x)
+                    faced += 1
+            if not seen:
                 return self._quick(s)
-            eq = sim_equity(sim)
+            # beating several ranges at once is likelier than the product of beating each
+            eq **= max(0.6, 1.1 - 0.1 * faced)
+            if name in ("AA", "KK"):
+                eq = max(eq, 0.5)
             if eq * (s.pot + s.to_call) - s.to_call > 0.04 * s.pot:
                 if eq > 0.62:
                     return Action("raise", s.max_raise_to)
@@ -371,6 +435,22 @@ class Bot:
             return Action("call")
         return Action("fold")
 
+    def _guard(self, s, best, fallback):
+        if best.kind != "raise":
+            return best
+        total = 2000 - s.my_stack + best.amount - s.my_bet
+        if total < 800:
+            return best
+        br = [c >> 2 for c in s.board]
+        a, b = s.hole[0] >> 2, s.hole[1] >> 2
+        top = made(a, b, br, max(br))
+        cat = evaluate(list(s.hole) + list(s.board)) >> 20
+        two = cat >= 4 or (a == b and a in br) or (a != b and (
+            (a in br and b in br) or (a in br and br.count(a) > 1) or (b in br and br.count(b) > 1)))
+        if two or (top and total < 1500):
+            return best
+        return fallback
+
     def _postflop(self, s):
         n = len(s.players)
         bb = s.big_blind
@@ -407,7 +487,8 @@ class Bot:
         # a starter bot that has raised never folds and bets every street, so the stack goes in on the river
         wait = barrel and st < 3 and s.my_stack > P
         big = barrel or all(roles.get(v) or self.model.sticky(v) for v in ranges)
-        tag = {v: line(v, 1, ctx["agg"], ctx["stuck"], ctx["checked"]) for v in ranges}
+        tag = {v: line(v, 2 if c > 0 else 1, ctx["agg"], ctx["stuck"], ctx["checked"], ctx["firm"])
+               for v in ranges}
 
         def response(sit, chips, x, ref):
             phi = 1.0
@@ -457,7 +538,7 @@ class Bot:
                     best, best_ev = Action("raise", s.my_bet + b), ev
                 if b >= most or (k >= thin and not barrel and (eqc < 0.6 or best.kind == "check")):
                     break
-            return best
+            return best if big else self._guard(s, best, Action("check"))
 
         if st == 3:
             real = 1.0
@@ -484,4 +565,6 @@ class Bot:
                     best, best_ev = Action("raise", s.my_bet + a), ev
                 if a >= most or (frac >= 1.0 and not barrel and (eqc < 0.6 or best.kind != "raise")):
                     break
-        return best
+        if big:
+            return best
+        return self._guard(s, best, Action("call") if ev_call > 0 else Action("fold"))

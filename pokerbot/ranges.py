@@ -18,6 +18,20 @@ _MASK = [1 << a | 1 << b for a, b in COMBOS]
 _STRONG = [a >> 2 == b >> 2 or a >> 2 >= 11 or b >> 2 >= 11 for a, b in COMBOS]
 
 
+def made(a, b, br, top):
+    if a == b:
+        return a > top or a in br
+    return (a == top or b == top or (a in br and b in br)
+            or (a in br and br.count(a) > 1) or (b in br and br.count(b) > 1))
+
+
+def strong_hand(hole, board):
+    br = [c >> 2 for c in board]
+    if evaluate(list(hole) + list(board)) >> 20 >= 4:
+        return True
+    return made(hole[0] >> 2, hole[1] >> 2, br, max(br))
+
+
 class Sample:
     def __init__(self, hero, rng, k):
         dead = 1 << hero[0] | 1 << hero[1]
@@ -32,6 +46,18 @@ class Sample:
         self.size = len(idx)
         self.pre_order = sorted(range(self.size), key=pct.__getitem__)
         self._boards = {}
+        self._flags = {}
+
+    def flags(self, board):
+        hit = self._flags.get(len(board))
+        if hit is None:
+            vals = self.board(board)[0]
+            br = [c >> 2 for c in board]
+            top = max(br)
+            hit = self._flags[len(board)] = [
+                v >= 0 and (v >> 20 >= 4 or made(x >> 2, y >> 2, br, top))
+                for v, (x, y) in zip(vals, self.combos)]
+        return hit
 
     def board(self, board):
         hit = self._boards.get(len(board))

@@ -164,7 +164,8 @@ class Agent:
         try:
             shown = {int(k): [parse_card(c) for c in v]
                      for k, v in (summary.get("shown") or {}).items()}
-            self.bot.end_hand(convert_history(summary["history"]), shown)
+            board = [parse_card(c) for c in summary.get("board") or ()]
+            self.bot.end_hand(convert_history(summary["history"]), shown, board)
         except Exception:
             pass
         if self.CALIBRATE and summary.get("hand_number", 1) % 128 == 0:

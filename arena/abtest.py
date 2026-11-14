@@ -64,12 +64,13 @@ def play_round(job):
             bots[nm] = KitSeat(make_agent(kind[4:], seed * 100 + int(i), False), order, nm, hands)
         else:
             bots[nm] = reg[kind](seed=seed * 100 + int(i))
-    _, log = Table(bots, seed=seed).play(hands)
+    table = Table(bots, seed=seed)
+    _, log = table.play(hands)
     others = {}
     for nm in names[1:]:
         kind = nm.rsplit("#", 1)[0]
         others.setdefault(kind, []).append(sum(log[nm]) / hands)
-    return log["hero"], hero.worst, hero.total, others
+    return log["hero"], hero.worst, hero.total, others, table.fair_log["hero"]
 
 
 def stats(rounds):
@@ -122,10 +123,18 @@ def main():
         print("%s %-34s %s   worst %.1f ms   think %.2f s/round" % (
             label, path[-34:], fmt(m, ci), 1000 * max(c[1] for c in chunk),
             sum(c[2] for c in chunk) / a.rounds))
+    fair = {label: [c[4] for c in res[vi * a.rounds:(vi + 1) * a.rounds]]
+            for vi, (label, _) in enumerate(variants)}
+    for label, _ in variants:
+        m, ci = stats(fair[label])
+        print("%s all-in luck removed: %s" % (label, fmt(m, ci)))
     if a.b:
         diffs = [[y - x for x, y in zip(ra, rb)] for ra, rb in zip(per["A"], per["B"])]
         m, ci = stats(diffs)
         print("B - A %s (paired by round)" % fmt(m, ci))
+        diffs = [[y - x for x, y in zip(ra, rb)] for ra, rb in zip(fair["A"], fair["B"])]
+        m, ci = stats(diffs)
+        print("B - A %s (paired, all-in luck removed)" % fmt(m, ci))
     kinds = {}
     for c in res[:a.rounds]:
         for k, xs in c[3].items():

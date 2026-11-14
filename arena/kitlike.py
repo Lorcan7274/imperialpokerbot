@@ -72,13 +72,14 @@ class KitSeat:
             return Action("raise", s.max_raise_to)
         return Action(kind, out.get("amount") or 0)
 
-    def end_hand(self, history, showdown):
+    def end_hand(self, history, showdown, board=()):
         if not hasattr(self.agent, "on_hand_end"):
             return
         t = time.perf_counter()
         shown = {str(self.seats.index(p)): [card_str(c) for c in cards]
                  for p, cards in (showdown or {}).items()}
-        self.agent.on_hand_end({"history": self.history(history), "shown": shown})
+        self.agent.on_hand_end({"history": self.history(history), "shown": shown,
+                                "board": [card_str(c) for c in board]})
         self.total += time.perf_counter() - t
 
 

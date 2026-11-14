@@ -1,8 +1,11 @@
 import random
-from itertools import cycle
+from itertools import combinations, cycle
 
 from pokerbot.cards import evaluate
 from pokerbot.state import Action, GameState, Rec
+
+
+BOARD_AT = {0: 0, 1: 3, 2: 4, 3: 5}
 
 
 class Table:
@@ -14,6 +17,8 @@ class Table:
         self.bb = bb
         self.rng = random.Random(seed)
         self.hand_no = 0
+        self.fair = {}
+        self.fair_log = {p: [] for p in self.seats}
 
     def play(self, hands):
         totals = {p: 0 for p in self.seats}
@@ -129,5 +134,46 @@ class Table:
         for p in order:
             end = getattr(self.bots[p], "end_hand", None)
             if end:
-                end(list(history), showdown)
-        return {p: won[p] - paid[p] for p in order}
+                if getattr(end, "__func__", end).__code__.co_argcount >= 4:
+                    end(list(history), showdown, list(board))
+                else:
+                    end(list(history), showdown)
+        result = {p: won[p] - paid[p] for p in order}
+        self.fair = result
+        known = BOARD_AT[history[-1].street]
+        if showdown and known < 5:
+            self.fair = self.expected(order, live, hole, board[:known], paid, self.hand_no)
+        for p in order:
+            self.fair_log[p].append(self.fair[p])
+        return result
+
+    def expected(self, order, live, hole, board, paid, seed):
+        # with no betting left, replace the dealt run-out by the average over every run-out
+        dead = set(board)
+        for p in order:
+            dead.update(hole[p])
+        deck = [c for c in range(52) if c not in dead]
+        need = 5 - len(board)
+        if need <= 2:
+            runs = list(combinations(deck, need))
+        else:
+            rng = random.Random(seed * 7919 + 13)
+            runs = [rng.sample(deck, need) for _ in range(400)]
+        levels = sorted({paid[p] for p in live})
+        pots = []
+        prev = 0
+        for lvl in levels:
+            pots.append((sum(min(paid[q], lvl) - min(paid[q], prev) for q in order),
+                         [p for p in live if paid[p] >= lvl]))
+            prev = lvl
+        got = {p: 0.0 for p in order}
+        for run in runs:
+            full = board + list(run)
+            val = {p: evaluate(hole[p] + full) for p in live}
+            for pot, elig in pots:
+                top = max(val[p] for p in elig)
+                winners = [p for p in elig if val[p] == top]
+                for p in winners:
+                    got[p] += pot / len(winners)
+        n = len(runs)
+        return {p: got[p] / n - paid[p] for p in order}

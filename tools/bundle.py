@@ -1,6 +1,6 @@
 import os
 
-ORDER = ["cards", "preflop_table", "preflop", "clone_table", "state", "model", "ranges", "bot", "agent"]
+ORDER = ["cards", "preflop_table", "preflop", "clone_table", "topx_table", "state", "model", "ranges", "bot", "agent"]
 
 
 def main():

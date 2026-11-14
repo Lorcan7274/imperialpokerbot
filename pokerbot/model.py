@@ -1,6 +1,25 @@
 from collections import defaultdict, namedtuple
 
-Event = namedtuple("Event", "player street sit act jam rec fit big")
+Event = namedtuple("Event", "player street sit act jam rec fit big frac")
+
+EDGES = (0.36, 0.48, 0.58, 0.68, 0.88)
+
+
+def tell_key(e):
+    if e.street == 0:
+        return None
+    g = 1 if e.street == 3 else 0
+    if e.act == "check" and e.sit[:8] == "p_no_bet":
+        return (g, "x")
+    if e.act != "raise":
+        return None
+    if e.sit[:8] != "p_no_bet":
+        return (g, "r")
+    k = 0
+    for edge in EDGES:
+        if e.frac >= edge:
+            k += 1
+    return (g, k)
 
 PRIORS = {
     ("unopened", "raise"): (0.45, 0.18),
@@ -29,21 +48,24 @@ PRIORS = {
     ("re_raised", "raise"): (0.12, 0.12),
 }
 for _sit in ("p_vs_bet", "p_vs_raise"):
-    for _tag, _f, _c, _r in ((":k", 0.55, 0.38, 0.07), (":a", 0.22, 0.60, 0.18), (":s", 0.28, 0.62, 0.10)):
+    for _tag, _f, _c, _r in ((":k", 0.55, 0.38, 0.07), (":a", 0.22, 0.60, 0.18), (":s", 0.28, 0.62, 0.10),
+                             (":x", 0.08, 0.62, 0.30)):
         PRIORS[(_sit + _tag, "fold")] = (_f, _f)
         PRIORS[(_sit + _tag, "call")] = (_c, _c)
         PRIORS[(_sit + _tag, "raise")] = (_r, _r)
 
 
-def line(p, raises, agg, stuck, checked):
+def line(p, raises, agg, stuck, checked, firm=()):
     if raises == 0:
         return ":a" if p in agg else ""
+    if raises > 1 and p in firm:
+        return ":x"
     return ":k" if p in checked else ":a" if p in agg else ":s" if p in stuck else ""
 
 
 def classify(history, bb, stack=2000, ctx=None):
     out = []
-    agg, stuck, checked = set(), set(), set()
+    agg, stuck, checked, firm = set(), set(), set(), set()
     street = None
     level = 0
     raises = 0
@@ -73,15 +95,18 @@ def classify(history, bb, stack=2000, ctx=None):
                 sit = "re_raised"
         else:
             sit = ("p_no_bet" if raises == 0 else "p_vs_bet" if raises == 1 else "p_vs_raise") + line(
-                p, raises, agg, stuck, checked)
+                p, raises, agg, stuck, checked, firm)
         fit = False
         big = level - prev > 2 * bb
         if r.kind == "raise":
             cap = prev + stack - paid.get(p, 0)
             fit = r.to == min(min(level + last, cap) + pot // 2, cap)
         jam = street == 0 and r.kind == "raise" and r.to >= 25 * bb
-        out.append(Event(p, street, sit, r.kind, jam, r, fit, big))
+        frac = r.to / pot if r.kind == "raise" and raises == 0 and street and pot > 0 else 0.0
+        out.append(Event(p, street, sit, r.kind, jam, r, fit, big, frac))
         if r.kind == "raise":
+            if street and raises:
+                firm.add(p)
             raises += 1
             if r.to - level >= last:
                 last = r.to - level
@@ -90,6 +115,9 @@ def classify(history, bb, stack=2000, ctx=None):
             checked.discard(p)
         elif r.kind == "call" and street:
             stuck.add(p)
+            checked.discard(p)
+            if raises > 1:
+                firm.add(p)
         elif r.kind == "check":
             checked.add(p)
         if r.kind in ("call", "raise"):
@@ -97,7 +125,7 @@ def classify(history, bb, stack=2000, ctx=None):
             paid[p] = paid.get(p, 0) + r.to - prev
             pot += r.to - prev
     if ctx is not None:
-        ctx.update(agg=agg, stuck=stuck, checked=checked)
+        ctx.update(agg=agg, stuck=stuck, checked=checked, firm=firm)
     return out
 
 
@@ -112,6 +140,7 @@ class Model:
         self.acts = defaultdict(int)
         self.viol = defaultdict(int)
         self.badshow = defaultdict(int)
+        self.tell = {}
 
     def observe(self, events, hero, shown=None):
         seen = set()
