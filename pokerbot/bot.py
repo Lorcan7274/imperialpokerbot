@@ -57,8 +57,8 @@ def strong_river_equity(hole, board):
     return won / tot if tot else 0.5
 
 
-TELL_PRIOR = ({"x": 0.09, "r": 0.64, "s": 0.75, "t": 0.84, "j": 0.58, "J": 0.72,
-               0: 0.14, 1: 0.37, 2: 0.24, 3: 0.54, 4: 0.68, 5: 0.67},
+TELL_PRIOR = ({"x": 0.09, "r": 0.63, "s": 0.76, "t": 0.84, "j": 0.52, "J": 0.72,
+               0: 0.22, 1: 0.4, 2: 0.22, 3: 0.58, 4: 0.7, 5: 0.7},
               {"x": 0.15, "r": 0.86, "s": 0.95, "t": 0.88, "j": 0.65, "J": 0.83,
                0: 0.19, 1: 0.51, 2: 0.27, 3: 0.62, 4: 0.84, 5: 0.90})
 
@@ -103,7 +103,7 @@ class Bot:
     KEEP = True
     OPEN_BB = 3.5
     TELLS = True
-    ONEPAIR = ({0: 0.8, 1: 0.8, 2: 0.8, 3: 0.8, 4: 0.55, 5: 0.55, "j": 0.5, "J": 0.5},
+    ONEPAIR = ({"j": 0.5, "J": 0.5},
                {0: 0.55, 1: 0.55, 2: 0.55, 3: 0.5, 4: 0.38, 5: 0.3, "j": 0.45, "J": 0.35})
 
     def __init__(self, seed=None, trials=90, strict=False, samples=160):
@@ -297,13 +297,15 @@ class Bot:
                 for i, k in enumerate(flags):
                     w[i] *= up if k else down
                 if base is not None and self.ONEPAIR:
-                    # shown bets short of top pair are air as often as small pairs, so that part keeps the mix
-                    # it had before the bet; and the good hands are one pair about as often as the showdowns say
+                    # shown river bets short of top pair are air as often as small pairs, so that part keeps the
+                    # mix it had before the bet; earlier streets stay as they were, since a call there meets more
+                    # bets; and the good hands are one pair about as often as the showdowns say
                     was = now = 0.0
-                    for x, y, k in zip(base, w, flags):
-                        if not k:
-                            was += x
-                            now += y
+                    if e.street == 3:
+                        for x, y, k in zip(base, w, flags):
+                            if not k:
+                                was += x
+                                now += y
                     if was > 0.0:
                         for i, k in enumerate(flags):
                             if not k:
