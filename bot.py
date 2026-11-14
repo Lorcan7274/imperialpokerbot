@@ -962,23 +962,27 @@ PRIORS = {
 }
 for _sit in ("p_vs_bet", "p_vs_raise"):
     for _tag, _f, _c, _r in ((":k", 0.55, 0.38, 0.07), (":a", 0.22, 0.60, 0.18), (":s", 0.28, 0.62, 0.10),
-                             (":x", 0.08, 0.62, 0.30)):
+                             (":x", 0.08, 0.62, 0.30), (":b", 0.08, 0.64, 0.28)):
         PRIORS[(_sit + _tag, "fold")] = (_f, _f)
         PRIORS[(_sit + _tag, "call")] = (_c, _c)
         PRIORS[(_sit + _tag, "raise")] = (_r, _r)
 
 
-def line(p, raises, agg, stuck, checked, firm=()):
+def line(p, raises, agg, stuck, checked, firm=(), bold=()):
     if raises == 0:
         return ":a" if p in agg else ""
     if raises > 1 and p in firm:
         return ":x"
+    # in the real field a bet of 0.58 pot or more almost never folds to a raise, and smaller bets often do
+    if raises > 1 and p in bold:
+        return ":b"
     return ":k" if p in checked else ":a" if p in agg else ":s" if p in stuck else ""
 
 
 def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
     out = []
     agg, stuck, checked, firm = set(), set(), set(), set()
+    bold = set()
     street = None
     level = 0
     raises = 0
@@ -996,6 +1000,7 @@ def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
             # whoever checked the last street through is still read as having checked when bet into
             checked = {q for q in checked if not bets.get(q)}
             bets = {}
+            bold = set()
         p = r.player
         prev = bets.get(p, 0)
         if r.kind in ("sb", "bb"):
@@ -1014,7 +1019,7 @@ def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
                 sit = "re_raised" if raises == 2 and p in agg else "vs_raise" if raises == 1 else "vs_3bet"
         else:
             sit = ("p_no_bet" if raises == 0 else "p_vs_bet" if raises == 1 else "p_vs_raise") + line(
-                p, raises, agg, stuck, checked, firm)
+                p, raises, agg, stuck, checked, firm, bold)
         fit = False
         big = level - prev > 2 * bb
         if r.kind == "raise":
@@ -1026,6 +1031,8 @@ def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
         if r.kind == "raise":
             if street and raises:
                 firm.add(p)
+            elif frac >= EDGES[2]:
+                bold.add(p)
             raises += 1
             if r.to - level >= last:
                 last = r.to - level
@@ -1046,7 +1053,7 @@ def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
     if ctx is not None:
         if now is not None and now != street:
             checked = {q for q in checked if not bets.get(q)}
-        ctx.update(agg=agg, stuck=stuck, checked=checked, firm=firm)
+        ctx.update(agg=agg, stuck=stuck, checked=checked, firm=firm, bold=bold)
     return out
 
 
@@ -1128,6 +1135,9 @@ class Model:
             opp += self.opp[(p, "p_vs_bet" + tag)]
             fold += self.cnt[(p, "p_vs_bet" + tag, "fold")]
         return opp >= 12 and fold <= 0.25 * opp
+
+    def gives_up(self, player, n=2):
+        return min(self.freq(player, "vs_raise", "fold", n), 1.0 - self.freq(player, "vs_hero", "raise", n))
 
     def opens(self, player, n=2):
         opp = cnt = 0
@@ -1496,6 +1506,7 @@ def floor_for(f, noise):
 class Bot:
     LIGHT3 = True
     POSW = False
+    ANY3 = 0.8
     PLAN = True
     MILK = True
     KEEP = True
@@ -1762,10 +1773,10 @@ class Bot:
             return None
         ok = 1.0
         for v in behind:
-            ok *= 0.664 if v in clones else self.model.freq(v, "vs_raise", "fold", n)
+            ok *= 0.664 if v in clones else self.model.gives_up(v, n)
         for v in limpers:
             if v not in clones:
-                ok *= self.model.freq(v, "vs_raise", "fold", n)
+                ok *= self.model.gives_up(v, n)
         # a starter bot without a raising hand calls up to 40 more, then pays 40 on the flop and the turn
         bets = {r.player: r.to for r in s.history}
         room = [bets.get(v, 0) + 2 * bb for v in limpers + behind if v in clones]
@@ -1852,7 +1863,7 @@ class Bot:
             loose = sum(1 - freq(v, "vs_raise", "fold", n) for v in villains) / max(1, len(villains))
             steal = 1.0
             for v in behind:
-                steal *= freq(v, "vs_raise", "fold", n)
+                steal *= self.model.gives_up(v, n)
             if behind and steal > 0.6:
                 pct = max(pct, min(1.0, 2.2 * steal - 0.7))
             else:
@@ -1887,13 +1898,16 @@ class Bot:
                 return self._raise(s, to)
             if p < (0.24 if s.my_bet >= bb else 0.11) * width * sizeadj:
                 return Action("call")
-            if self.LIGHT3 and p < 0.6 and self.model.opp[(r, "re_raised")] >= 2 and all(
-                    e.act == "fold" or e.player == r for e in events):
+            limped = {e.player for e in events if e.act == "call" and e.player in clones}
+            if self.LIGHT3 and self.model.opp[(r, "re_raised")] >= 2 and all(
+                    e.act == "fold" or e.player == r or e.player in limped for e in events):
                 ff = freq(r, "re_raised", "fold", n)
                 for v in villains:
-                    if v != r:
+                    # a starter bot that limped folds to any re-raise
+                    if v != r and v not in limped:
                         ff *= 0.664 if v in clones else 0.94
-                if to < 0.4 * (s.my_stack + s.my_bet) and ff * s.pot > (1 - ff) * (to - s.my_bet) + 0.1 * s.pot:
+                if (p < (0.6 if ff < self.ANY3 else 1.0) and to < 0.4 * (s.my_stack + s.my_bet)
+                        and ff * s.pot > (1 - ff) * (to - s.my_bet) + 0.1 * s.pot):
                     return Action("raise", to)
             return Action("fold")
 
@@ -1984,7 +1998,7 @@ class Bot:
         # a starter bot that has raised never folds and bets every street, so the stack goes in on the river
         wait = barrel and st < 3 and s.my_stack > P
         big = barrel or all(roles.get(v) or self.model.sticky(v) for v in ranges)
-        tag = {v: line(v, 2 if c > 0 else 1, ctx["agg"], ctx["stuck"], ctx["checked"], ctx["firm"])
+        tag = {v: line(v, 2 if c > 0 else 1, ctx["agg"], ctx["stuck"], ctx["checked"], ctx["firm"], ctx["bold"])
                for v in ranges}
 
         def response(sit, chips, x, ref):
