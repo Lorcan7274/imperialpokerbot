@@ -14,7 +14,6 @@ from collections import Counter
 STREETS = ["preflop", "flop", "turn", "river"]
 KINDS = ["fold", "check", "call", "raise"]
 RAISES = ("raise", "bet", "all_in", "allin")
-STARTERS = "FisherMen,Phil AIvey,Attention Is All In,Joca"
 PARTS = ["convert_state", "classify", "Sample.__init__", "Sample.board", "narrow", "keep_top",
          "simulate", "sim_equity", "river_equity", "strong_river_equity"]
 now = time.perf_counter
@@ -273,7 +272,18 @@ def replay_round(job):
         data = json.load(f)
     hands, me, teams = data["hands"], data["seat"], data["players"]
     meta = data.get("round") or {}
-    starters = {s for s, t in enumerate(teams) if t in a.starters.split(",")}
+    flags = {s: {"spans": [], "sized": [0, 0]} for s in range(len(teams)) if s != me}
+    for rec in hands:
+        for state, kind, amount in Hand(rec).steps():
+            if kind == "raise" and state["seat"] != me and state["min_raise_to"] is not None:
+                sized = flags[state["seat"]]["sized"]
+                sized[1] += 1
+                sized[0] += amount == min(state["min_raise_to"] + state["pot"] // 2,
+                                          state["max_raise_to"])
+    for s, f in flags.items():
+        f["plays"] = f["sized"][1] >= 10 and f["sized"][0] == f["sized"][1]
+        f["known"] = teams[s] in a.starters.split(",") if a.starters else f["plays"]
+    starters = {s for s, f in flags.items() if f["known"]}
     # freezing keeps this tool's own heap out of the bot's garbage collections, as in the bare runner
     gc.collect()
     gc.freeze()
@@ -317,8 +327,7 @@ def replay_round(job):
         started = call("table start", agent.on_table_start, info)[2]
     speed0 = getattr(agent, "speed", None)
     limit = getattr(agent, "LIMIT", None)
-    flags = {s: {"spans": [], "sized": [0, 0]} for s in range(len(teams)) if s != me}
-    fit = [0, 0, 0, 0]
+    fit = [sum(flags[s]["sized"][i] for s in starters) for i in (0, 1)] + [0, 0]
     odd = []
     rebuilt = 0
     tag = os.path.basename(path).rsplit("_", 1)[-1].split(".")[0]
@@ -331,11 +340,6 @@ def replay_round(job):
             rebuilt += 1
             seat = state["seat"]
             if seat != me:
-                if old == "raise" and state["min_raise_to"] is not None:
-                    sized = flags[seat]["sized"]
-                    sized[1] += 1
-                    sized[0] += old_to == min(state["min_raise_to"] + state["pot"] // 2,
-                                              state["max_raise_to"])
                 if seat in starters and state["hole_cards"]:
                     want = starter_move(state)
                     fit[3] += 1
@@ -388,9 +392,6 @@ def replay_round(job):
         f["final"] = bool(is_clone and is_clone(s))
         f["model"] = [getattr(model, k).get(s, 0) if hasattr(model, k) else -1
                       for k in ("rfit", "rtot", "viol", "badshow")]
-        if s in starters:
-            fit[0] += f["sized"][0]
-            fit[1] += f["sized"][1]
     return {"file": os.path.basename(path), "seat": me, "teams": teams, "meta": meta,
             "hands": len(hands), "decisions": decisions, "ends": ends, "loaded": loaded,
             "started": started, "speed0": speed0, "errors": errors, "problems": problems,
@@ -510,18 +511,18 @@ def slowest(ds, a):
                   d["cards"], d["old"], d["new"], d["new_to"] or "", " | " + inner if inner else ""))
 
 
-def flag_rows(r, known):
+def flag_rows(r):
     out = []
     for s, f in sorted(r["flags"].items()):
-        team = r["teams"][s]
         spans = ", ".join("%d-%d" % tuple(x) for x in f["spans"][:4]) + (
             " and %d more" % (len(f["spans"]) - 4) if len(f["spans"]) > 4 else "")
-        out.append((team, f["final"], team in known, spans or "never", f["model"], f["sized"], s))
+        out.append((r["teams"][s], f["final"], f["known"], f["plays"], spans or "never", f["model"],
+                    f["sized"], s))
     return out
 
 
 def show(r, a):
-    ds, meta, known = r["decisions"], r["meta"], a.starters.split(",")
+    ds, meta = r["decisions"], r["meta"]
     print("== %s  seat %d of %d  %d hands  %d decisions" % (
         r["file"], r["seat"], len(r["teams"]), r["hands"], len(ds)))
     if meta:
@@ -542,19 +543,20 @@ def show(r, a):
     trouble(r["errors"], ds)
     clock_report(ds, r["ends"], a)
     if r["can_flag"]:
-        print("   starter flags   seat team                      at end  known  raises of starter size: "
-              "rebuilt  bot's count  viol  badshow  flagged after hands")
-        for team, final, want, spans, m, sized, s in flag_rows(r, known):
-            print("   %-15s %4d %-25s %-7s %-5s %26d/%-5d %5d/%-5d %5d  %7d  %s" % (
+        print("   starter flags   seat team                      at end  %s  every raise starter-sized: "
+              "rebuilt  bot's count  viol  badshow  flagged after hands" % (
+                  "listed" if a.starters else "starter"))
+        for team, final, want, plays, spans, m, sized, s in flag_rows(r):
+            print("   %-15s %4d %-25s %-7s %-7s %-3s %24d/%-5d %5d/%-5d %5d  %7d  %s" % (
                 "" if final == want else "MISMATCH", s, team[:25], "yes" if final else "no",
-                "yes" if want else "no", sized[0], sized[1], m[0], m[1], m[2], m[3], spans))
+                "yes" if want else "no", "yes" if plays else "no", sized[0], sized[1], m[0], m[1], m[2],
+                m[3], spans))
     actions(ds)
 
 
 def overall(rounds, a):
     ds = [d for r in rounds for d in r["decisions"]]
     ends = [e for r in rounds for e in r["ends"]]
-    known = a.starters.split(",")
     print("== ALL %d ROUNDS  %s  %d decisions%s%s" % (
         len(rounds), os.path.basename(a.bundle), len(ds),
         "  bot clock = %g x cpu time" % a.emulate if a.emulate else "", "  metered" if a.explain else ""))
@@ -570,16 +572,20 @@ def overall(rounds, a):
         wrong = 0
         teams = {}
         for r in rounds:
-            for team, final, want, spans, m, sized, s in flag_rows(r, known):
+            for team, final, want, plays, spans, m, sized, s in flag_rows(r):
                 wrong += final != want
-                teams.setdefault(team, []).append("%s %s%s (%d/%d)" % (
+                kind, notes = teams.setdefault(team, [set(), []])
+                kind.add(want)
+                notes.append("%s %s%s (%d/%d)" % (
                     r["file"].rsplit("_", 1)[-1].split(".")[0], spans,
                     "" if final or spans == "never" else " but not at the end", sized[0], sized[1]))
-        print("   starter flags at the end of each round against the known list: %s; per team, the hands "
-              "after which it was flagged (raises of starter size / raises)" % (
+        print("   starter flags at the end of each round against %s: %s; per team, the hands after which "
+              "it was flagged (raises of starter size / raises)" % (
+                  "the list given" if a.starters else "seats whose every raise has the starter's size",
                   "all match" if not wrong else "%d MISMATCHES" % wrong))
-        for team, notes in sorted(teams.items(), key=lambda kv: (kv[0] not in known, kv[0])):
-            print("   %-8s %-25s %s" % ("starter" if team in known else "other", team[:25], "; ".join(notes)))
+        for team, (kind, notes) in sorted(teams.items(), key=lambda kv: (True not in kv[1][0], kv[0])):
+            print("   %-8s %-25s %s" % ("starter" if kind == {True} else "changed" if True in kind else "other",
+                                        team[:25], "; ".join(notes)))
 
 
 def main():
@@ -600,8 +606,9 @@ def main():
     ap.add_argument("--explain", action="store_true",
                     help="time the bundle's main functions inside every decision (adds overhead)")
     ap.add_argument("--top", type=int, default=12, help="how many of the slowest decisions to list")
-    ap.add_argument("--starters", default=STARTERS,
-                    help="comma list of teams known to run the unmodified starter bot")
+    ap.add_argument("--starters", default="",
+                    help="comma list of teams to hold the starter flags against; default is every "
+                         "seat whose raises all have the starter bot's size in that round")
     ap.add_argument("--json", default="", help="also write every decision to this file")
     a = ap.parse_intermixed_args()
     a.bundle = os.path.abspath(a.bundle)
