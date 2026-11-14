@@ -76,6 +76,11 @@ for _sit, _rows in (
         PRIORS[(_sit + _tag, "raise")] = (_r, _r)
 
 
+def jam_kind(sit):
+    # a player's open shoves, re-raise shoves and later shoves are different ranges
+    return "o" if sit[:8] == "unopened" else "3" if sit == "vs_raise" else "4"
+
+
 def line(p, raises, agg, stuck, checked, firm=(), bold=()):
     if raises == 0:
         return ":a" if p in agg else ""
@@ -185,7 +190,7 @@ class Model:
     def observe(self, events, hero, shown=None):
         seen = set()
         hot = set()
-        jams = set()
+        jams = {}
         last = None
         raises = 0
         acted = set()
@@ -213,7 +218,7 @@ class Model:
             seen.add(p)
             self.acts[p] += 1
             if e.jam:
-                jams.add(p)
+                jams[p] = jam_kind(e.sit)
             # how an opener answers a starter bot's re-raise says little about how it answers ours
             if e.sit != "re_raised" or facing is None or not self.is_clone(facing):
                 self.opp[(p, e.sit)] += 1
@@ -240,7 +245,7 @@ class Model:
                 if (a == b or a >= 11 or b >= 11) != (p in hot):
                     self.badshow[p] += 1
                 if p in jams:
-                    t = self.jamx.setdefault(p, [0, 0.0])
+                    t = self.jamx.setdefault((p, jams[p]), [0, 0.0])
                     t[0] += 1
                     t[1] += percentile(*cards)
 

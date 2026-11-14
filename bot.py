@@ -978,6 +978,11 @@ for _sit, _rows in (
         PRIORS[(_sit + _tag, "raise")] = (_r, _r)
 
 
+def jam_kind(sit):
+    # a player's open shoves, re-raise shoves and later shoves are different ranges
+    return "o" if sit[:8] == "unopened" else "3" if sit == "vs_raise" else "4"
+
+
 def line(p, raises, agg, stuck, checked, firm=(), bold=()):
     if raises == 0:
         return ":a" if p in agg else ""
@@ -1087,7 +1092,7 @@ class Model:
     def observe(self, events, hero, shown=None):
         seen = set()
         hot = set()
-        jams = set()
+        jams = {}
         last = None
         raises = 0
         acted = set()
@@ -1115,7 +1120,7 @@ class Model:
             seen.add(p)
             self.acts[p] += 1
             if e.jam:
-                jams.add(p)
+                jams[p] = jam_kind(e.sit)
             # how an opener answers a starter bot's re-raise says little about how it answers ours
             if e.sit != "re_raised" or facing is None or not self.is_clone(facing):
                 self.opp[(p, e.sit)] += 1
@@ -1142,7 +1147,7 @@ class Model:
                 if (a == b or a >= 11 or b >= 11) != (p in hot):
                     self.badshow[p] += 1
                 if p in jams:
-                    t = self.jamx.setdefault(p, [0, 0.0])
+                    t = self.jamx.setdefault((p, jams[p]), [0, 0.0])
                     t[0] += 1
                     t[1] += percentile(*cards)
 
@@ -1862,17 +1867,25 @@ class Bot:
             if len(into) == 1 and into[0] not in clones:
                 v = into[0]
                 x = 1.0
-                jam = False
+                jam = None
                 for e in events:
                     if e.player == v and e.act == "raise":
                         x *= freq(v, e.sit, "jam" if e.jam else "raise", n)
-                        jam = jam or e.jam
+                        if e.jam:
+                            jam = jam_kind(e.sit)
                     elif e.player == v and e.act == "call":
                         x *= min(1.0, freq(v, e.sit, "raise", n) + freq(v, e.sit, "call", n))
                 if jam:
-                    # shown all-in hands in this field run about twice as wide as the frequency suggests
-                    t = self.model.jamx.get(v, (0, 0.0))
-                    x = (2 * x + 2 * (t[1] + 0.06)) / (4 + t[0])
+                    # shown all-in hands in this field run about twice as wide as the frequency suggests;
+                    # the same kind of shove counts in full, the player's other shoves at half weight
+                    seen = shown = 0.0
+                    for kind in "o34":
+                        t = self.model.jamx.get((v, kind))
+                        if t:
+                            share = 1.0 if kind == jam else 0.5
+                            seen += share * t[0]
+                            shown += share * t[1]
+                    x = (2 * x + 2 * (shown + 0.06)) / (4 + seen)
                 eq = topx(name, x)
                 if name in ("AA", "KK"):
                     eq = max(eq, 0.5)
@@ -2089,6 +2102,8 @@ class Bot:
             phi = 1.0
             mults = []
             exact = True
+            # the field folds to a third-pot bet less than half as often as to a two-thirds one
+            steep = (x / ref) ** (1.6 if x < ref and sit == "p_vs_bet" else 0.7)
             for v, w in ranges.items():
                 role = roles.get(v)
                 if role == "strong":
@@ -2096,7 +2111,7 @@ class Bot:
                 elif role == "weak":
                     ff = 1.0 if chips > 2 * bb else 0.0
                 else:
-                    ff = clamp(freq(v, sit + tag[v], "fold", n) * (x / ref) ** 0.7 * firmer, 0.02, 0.95)
+                    ff = clamp(freq(v, sit + tag[v], "fold", n) * steep * firmer, 0.02, 0.95)
                     exact = False
                 phi *= ff
                 mults.append(keep_top(w, order, 1 - ff, 0.02) if 0.0 < ff < 1.0 else None)
