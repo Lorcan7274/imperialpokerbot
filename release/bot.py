@@ -902,6 +902,7 @@ class GameState:
         return {0: 0, 3: 1, 4: 2, 5: 3}[len(self.board)]
 
 
+
 Event = namedtuple("Event", "player street sit act jam rec fit big frac")
 
 EDGES = (0.36, 0.48, 0.58, 0.68, 0.88)
@@ -924,8 +925,17 @@ def tell_key(e):
     return (g, k)
 
 PRIORS = {
-    ("unopened", "raise"): (0.45, 0.18),
-    ("unopened", "call"): (0.15, 0.10),
+    ("unopened", "raise"): (0.45, 0.17),
+    ("unopened", "call"): (0.15, 0.05),
+    ("unopened:l", "raise"): (0.45, 0.33),
+    ("unopened:l", "call"): (0.15, 0.06),
+    ("unopened:b", "raise"): (0.45, 0.42),
+    ("unopened:b", "call"): (0.15, 0.12),
+    ("unopened:o", "raise"): (0.30, 0.28),
+    ("unopened:o", "call"): (0.01, 0.01),
+    ("unopened:l", "jam"): (0.012, 0.012),
+    ("unopened:b", "jam"): (0.012, 0.012),
+    ("unopened:o", "jam"): (0.012, 0.012),
     ("vs_raise", "fold"): (0.50, 0.75),
     ("vs_raise", "call"): (0.38, 0.18),
     ("vs_raise", "raise"): (0.12, 0.07),
@@ -945,34 +955,40 @@ PRIORS = {
     ("vs_raise", "jam"): (0.02, 0.02),
     ("vs_3bet", "jam"): (0.08, 0.08),
     ("re_raised", "jam"): (0.08, 0.08),
+    ("vs_hero", "raise"): (0.12, 0.06),
     ("re_raised", "fold"): (0.70, 0.70),
     ("re_raised", "call"): (0.18, 0.18),
     ("re_raised", "raise"): (0.12, 0.12),
 }
 for _sit in ("p_vs_bet", "p_vs_raise"):
     for _tag, _f, _c, _r in ((":k", 0.55, 0.38, 0.07), (":a", 0.22, 0.60, 0.18), (":s", 0.28, 0.62, 0.10),
-                             (":x", 0.08, 0.62, 0.30)):
+                             (":x", 0.08, 0.62, 0.30), (":b", 0.08, 0.64, 0.28)):
         PRIORS[(_sit + _tag, "fold")] = (_f, _f)
         PRIORS[(_sit + _tag, "call")] = (_c, _c)
         PRIORS[(_sit + _tag, "raise")] = (_r, _r)
 
 
-def line(p, raises, agg, stuck, checked, firm=()):
+def line(p, raises, agg, stuck, checked, firm=(), bold=()):
     if raises == 0:
         return ":a" if p in agg else ""
     if raises > 1 and p in firm:
         return ":x"
+    # in the real field a bet of 0.58 pot or more almost never folds to a raise, and smaller bets often do
+    if raises > 1 and p in bold:
+        return ":b"
     return ":k" if p in checked else ":a" if p in agg else ":s" if p in stuck else ""
 
 
-def classify(history, bb, stack=2000, ctx=None, now=None):
+def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
     out = []
     agg, stuck, checked, firm = set(), set(), set(), set()
+    bold = set()
     street = None
     level = 0
     raises = 0
     last = bb
     pot = 0
+    acted = 0
     bets = {}
     paid = {}
     for r in history:
@@ -984,6 +1000,7 @@ def classify(history, bb, stack=2000, ctx=None, now=None):
             # whoever checked the last street through is still read as having checked when bet into
             checked = {q for q in checked if not bets.get(q)}
             bets = {}
+            bold = set()
         p = r.player
         prev = bets.get(p, 0)
         if r.kind in ("sb", "bb"):
@@ -993,12 +1010,16 @@ def classify(history, bb, stack=2000, ctx=None, now=None):
             level = max(level, r.to)
             continue
         if street == 0:
-            sit = "unopened" if raises == 0 else "vs_raise" if raises == 1 else "vs_3bet"
-            if raises == 2 and p in agg:
-                sit = "re_raised"
+            if raises == 0:
+                # seats still to act behind: the blinds are last, and earlier seats open tighter
+                left = n - 1 - acted if n else 9
+                sit = "unopened" + (":o" if left <= 0 else ":b" if left == 1 else ":l" if left <= 3 else "")
+                acted += 1
+            else:
+                sit = "re_raised" if raises == 2 and p in agg else "vs_raise" if raises == 1 else "vs_3bet"
         else:
             sit = ("p_no_bet" if raises == 0 else "p_vs_bet" if raises == 1 else "p_vs_raise") + line(
-                p, raises, agg, stuck, checked, firm)
+                p, raises, agg, stuck, checked, firm, bold)
         fit = False
         big = level - prev > 2 * bb
         if r.kind == "raise":
@@ -1010,6 +1031,8 @@ def classify(history, bb, stack=2000, ctx=None, now=None):
         if r.kind == "raise":
             if street and raises:
                 firm.add(p)
+            elif frac >= EDGES[2]:
+                bold.add(p)
             raises += 1
             if r.to - level >= last:
                 last = r.to - level
@@ -1030,7 +1053,7 @@ def classify(history, bb, stack=2000, ctx=None, now=None):
     if ctx is not None:
         if now is not None and now != street:
             checked = {q for q in checked if not bets.get(q)}
-        ctx.update(agg=agg, stuck=stuck, checked=checked, firm=firm)
+        ctx.update(agg=agg, stuck=stuck, checked=checked, firm=firm, bold=bold)
     return out
 
 
@@ -1046,23 +1069,41 @@ class Model:
         self.viol = defaultdict(int)
         self.badshow = defaultdict(int)
         self.tell = {}
+        self.jamx = {}
 
     def observe(self, events, hero, shown=None):
         seen = set()
         hot = set()
+        jams = set()
+        last = None
+        raises = 0
         for e in events:
             p = e.player
+            facing = last
+            if e.street == 0 and e.act == "raise":
+                last = p
+                raises += 1
             if p == hero:
                 continue
+            # a player who re-raises our opens in particular is read apart from how it treats the table
+            if e.sit == "vs_raise" and facing == hero:
+                self.opp[(p, "vs_hero")] += 1
+                if e.act == "raise":
+                    self.cnt[(p, "vs_hero", "raise")] += 1
             seen.add(p)
             self.acts[p] += 1
-            self.opp[(p, e.sit)] += 1
-            self.cnt[(p, e.sit, e.act)] += 1
+            if e.jam:
+                jams.add(p)
+            # how an opener answers a starter bot's re-raise says little about how it answers ours
+            if e.sit != "re_raised" or facing is None or not self.is_clone(facing):
+                self.opp[(p, e.sit)] += 1
+                self.cnt[(p, e.sit, e.act)] += 1
+                if e.jam:
+                    self.cnt[(p, e.sit, "jam")] += 1
             if e.street == 0:
                 self.opp[(p, "jam")] += 1
                 if e.jam:
                     self.cnt[(p, "jam", "jam")] += 1
-                    self.cnt[(p, e.sit, "jam")] += 1
             if e.act == "raise":
                 self.rtot[p] += 1
                 self.rfit[p] += e.fit
@@ -1078,6 +1119,10 @@ class Model:
                 a, b = cards[0] >> 2, cards[1] >> 2
                 if (a == b or a >= 11 or b >= 11) != (p in hot):
                     self.badshow[p] += 1
+                if p in jams:
+                    t = self.jamx.setdefault(p, [0, 0.0])
+                    t[0] += 1
+                    t[1] += percentile(*cards)
 
     def is_clone(self, p):
         n = self.rtot[p]
@@ -1090,6 +1135,16 @@ class Model:
             opp += self.opp[(p, "p_vs_bet" + tag)]
             fold += self.cnt[(p, "p_vs_bet" + tag, "fold")]
         return opp >= 12 and fold <= 0.25 * opp
+
+    def gives_up(self, player, n=2):
+        return min(self.freq(player, "vs_raise", "fold", n), 1.0 - self.freq(player, "vs_hero", "raise", n))
+
+    def opens(self, player, n=2):
+        opp = cnt = 0
+        for tag in ("", ":l", ":b", ":o"):
+            opp += self.opp[(player, "unopened" + tag)]
+            cnt += self.cnt[(player, "unopened" + tag, "raise")]
+        return (cnt + (0.45 if n <= 2 else 0.18) * self.strength) / (opp + self.strength)
 
     def freq(self, player, sit, act, n=2):
         prior = PRIORS[(sit, act)][0 if n <= 2 else 1]
@@ -1415,7 +1470,8 @@ def strong_river_equity(hole, board):
     return won / tot if tot else 0.5
 
 
-TELL_PRIOR = {"x": 0.12, "r": 0.8, 0: 0.15, 1: 0.25, 2: 0.15, 3: 0.55, 4: 0.7, 5: 0.7}
+TELL_PRIOR = ({"x": 0.10, "r": 0.75, 0: 0.15, 1: 0.35, 2: 0.2, 3: 0.55, 4: 0.7, 5: 0.7},
+              {"x": 0.12, "r": 0.8, 0: 0.3, 1: 0.45, 2: 0.25, 3: 0.75, 4: 0.8, 5: 0.9})
 
 
 def topx(name, x):
@@ -1429,12 +1485,28 @@ def topx(name, x):
     return row[-1]
 
 
+def learn_tells(tell, events, shown, board, hero):
+    for e in events:
+        hole = shown.get(e.player)
+        key = tell_key(e)
+        if key is None or hole is None or e.player == hero or len(hole) != 2:
+            continue
+        cards = board[:BOARD_LEN[e.street]]
+        if len(cards) < BOARD_LEN[e.street]:
+            continue
+        t = tell.setdefault((e.player,) + key, [0, 0])
+        t[0] += 1
+        t[1] += strong_hand(hole, cards)
+
+
 def floor_for(f, noise):
     return noise * f / (noise * f + 1 - noise)
 
 
 class Bot:
     LIGHT3 = True
+    POSW = False
+    ANY3 = 0.8
     PLAN = True
     MILK = True
     KEEP = True
@@ -1454,6 +1526,7 @@ class Bot:
         self._hist = []
         self._hero = None
         self._bb = 20
+        self.seats = 0
 
     def decide(self, s):
         if s.hand_id != self._hand:
@@ -1463,6 +1536,7 @@ class Bot:
         self._hist = list(s.history)
         self._hero = s.hero
         self._bb = s.big_blind
+        self.seats = len(s.players)
         try:
             a = self._postflop(s) if s.board else self._preflop(s)
         except Exception:
@@ -1481,25 +1555,14 @@ class Bot:
 
     def _commit(self, shown=None, board=None):
         if self._hist:
-            events = classify(self._hist, self._bb)
+            events = classify(self._hist, self._bb, n=self.seats)
             self.model.observe(events, self._hero, shown)
             if shown and board and self.TELLS:
                 self._learn(events, shown, board)
         self._hist = []
 
     def _learn(self, events, shown, board):
-        tell = self.model.tell
-        for e in events:
-            hole = shown.get(e.player)
-            key = tell_key(e)
-            if key is None or hole is None or e.player == self._hero or len(hole) != 2:
-                continue
-            cards = board[:BOARD_LEN[e.street]]
-            if len(cards) < BOARD_LEN[e.street]:
-                continue
-            t = tell.setdefault((e.player,) + key, [0, 0])
-            t[0] += 1
-            t[1] += strong_hand(hole, cards)
+        learn_tells(self.model.tell, events, shown, board, self._hero)
 
     def _late(self):
         return self.deadline is not None and perf_counter() > self.deadline
@@ -1608,7 +1671,7 @@ class Bot:
                     hit += x
             if 0.0 < hit < tot:
                 share = hit / tot
-                q = clamp((t[1] + 2 * TELL_PRIOR[key[1]]) / (t[0] + 2), 0.02, 0.98)
+                q = clamp((t[1] + 2 * TELL_PRIOR[key[0]][key[1]]) / (t[0] + 2), 0.02, 0.98)
                 up, down = q / share, (1 - q) / (1 - share)
                 for i, k in enumerate(flags):
                     w[i] *= up if k else down
@@ -1710,10 +1773,10 @@ class Bot:
             return None
         ok = 1.0
         for v in behind:
-            ok *= 0.664 if v in clones else self.model.freq(v, "vs_raise", "fold", n)
+            ok *= 0.664 if v in clones else self.model.gives_up(v, n)
         for v in limpers:
             if v not in clones:
-                ok *= self.model.freq(v, "vs_raise", "fold", n)
+                ok *= self.model.gives_up(v, n)
         # a starter bot without a raising hand calls up to 40 more, then pays 40 on the flop and the turn
         bets = {r.player: r.to for r in s.history}
         room = [bets.get(v, 0) + 2 * bb for v in limpers + behind if v in clones]
@@ -1728,7 +1791,7 @@ class Bot:
     def _preflop(self, s):
         bb = s.big_blind
         n = len(s.players)
-        allev = classify(s.history, bb)
+        allev = classify(s.history, bb, n=n)
         events = [e for e in allev if e.street == 0]
         raises = [e for e in events if e.act == "raise"]
         p = percentile(*s.hole)
@@ -1745,31 +1808,34 @@ class Bot:
 
         if raises and (s.to_call >= 0.3 * s.my_stack or raises[-1].jam or level >= 25 * bb):
             name = class_name(*s.hole)
-            eq = 1.0
-            seen = False
-            faced = 0
-            for v in villains:
+            into = [v for v in villains
+                    if any(e.player == v and e.act in ("raise", "call") for e in events)]
+            if len(into) == 1 and into[0] not in clones:
+                v = into[0]
                 x = 1.0
+                jam = False
                 for e in events:
-                    if e.player != v:
-                        continue
-                    if e.act == "raise":
+                    if e.player == v and e.act == "raise":
                         x *= freq(v, e.sit, "jam" if e.jam else "raise", n)
-                        seen = True
-                    elif e.act == "call":
+                        jam = jam or e.jam
+                    elif e.player == v and e.act == "call":
                         x *= min(1.0, freq(v, e.sit, "raise", n) + freq(v, e.sit, "call", n))
-                        seen = True
-                    else:
-                        x = 0.0
-                if x > 0.0 and x < 1.0:
-                    eq *= CLONE1[name] if v in clones else topx(name, x)
-                    faced += 1
-            if not seen:
-                return self._quick(s)
-            # beating several ranges at once is likelier than the product of beating each
-            eq **= max(0.6, 1.1 - 0.1 * faced)
-            if name in ("AA", "KK"):
-                eq = max(eq, 0.5)
+                t = self.model.jamx.get(v)
+                if jam and t:
+                    # hands this player has shown after going all-in say more than how often it does
+                    x = (3 * x + 2 * t[1]) / (3 + t[0])
+                eq = topx(name, x)
+                if name in ("AA", "KK"):
+                    eq = max(eq, 0.5)
+            else:
+                roles = self._roles(s, events)
+                ranges = self._ranges(s, events, roles)
+                against = [ranges[v] for v in into] or list(ranges.values())
+                sim = simulate(s.hole, [], self._sample, against, self._trials(len(against)),
+                               self.rng, self.deadline)
+                if not sim or (len(sim) < 12 and self._late() and not any(roles.values())):
+                    return self._quick(s)
+                eq = sim_equity(sim)
             if eq * (s.pot + s.to_call) - s.to_call > 0.04 * s.pot:
                 if eq > 0.62:
                     return Action("raise", s.max_raise_to)
@@ -1797,7 +1863,7 @@ class Bot:
             loose = sum(1 - freq(v, "vs_raise", "fold", n) for v in villains) / max(1, len(villains))
             steal = 1.0
             for v in behind:
-                steal *= freq(v, "vs_raise", "fold", n)
+                steal *= self.model.gives_up(v, n)
             if behind and steal > 0.6:
                 pct = max(pct, min(1.0, 2.2 * steal - 0.7))
             else:
@@ -1817,7 +1883,8 @@ class Bot:
         ip = self._in_position(s)
         if len(raises) == 1:
             base = 0.45 if n == 2 else 0.18
-            width = clamp(freq(r, "unopened", "raise", n) / base, 0.5, 2.2)
+            width = clamp((freq(r, raises[0].sit, "raise", n) if self.POSW else self.model.opens(r, n)) / base,
+                          0.5, 2.2)
             sizeadj = clamp((2.5 * bb / level) ** 0.5, 0.45, 1.2)
             to = level * (3.2 if ip else 3.8)
             if n == 2:
@@ -1831,22 +1898,30 @@ class Bot:
                 return self._raise(s, to)
             if p < (0.24 if s.my_bet >= bb else 0.11) * width * sizeadj:
                 return Action("call")
-            if self.LIGHT3 and p < 0.6 and self.model.opp[(r, "re_raised")] >= 2 and all(
-                    e.act == "fold" or e.player == r for e in events):
+            limped = {e.player for e in events if e.act == "call" and e.player in clones}
+            if self.LIGHT3 and self.model.opp[(r, "re_raised")] >= 2 and all(
+                    e.act == "fold" or e.player == r or e.player in limped for e in events):
                 ff = freq(r, "re_raised", "fold", n)
                 for v in villains:
-                    if v != r:
+                    # a starter bot that limped folds to any re-raise
+                    if v != r and v not in limped:
                         ff *= 0.664 if v in clones else 0.94
-                if to < 0.4 * (s.my_stack + s.my_bet) and ff * s.pot > (1 - ff) * (to - s.my_bet) + 0.1 * s.pot:
+                if (p < (0.6 if ff < self.ANY3 else 1.0) and to < 0.4 * (s.my_stack + s.my_bet)
+                        and ff * s.pot > (1 - ff) * (to - s.my_bet) + 0.1 * s.pot):
                     return Action("raise", to)
             return Action("fold")
 
         if len(raises) == 2:
-            width = clamp(freq(r, "vs_raise", "raise", n) / (0.12 if n == 2 else 0.07), 0.5, 3.0)
+            f3 = freq(r, "vs_raise", "raise", n)
             invested = any(e.player == s.hero and e.act == "raise" for e in events)
-            if p < 0.03 * width:
+            if raises[0].player == s.hero:
+                f3 = max(f3, freq(r, "vs_hero", "raise", n))
+            width = clamp(f3 / (0.12 if n == 2 else 0.07), 0.5, 3.0)
+            # against someone who re-raises most opens, most of an opening range is ahead
+            if p < max(0.03 * width, 0.2 * f3):
                 return self._raise(s, 2.3 * level)
-            if p < ((0.30 if n == 2 else 0.14) if invested else 0.05) * width:
+            if p < max(((0.30 if n == 2 else 0.14) if invested else 0.05) * width,
+                       0.6 * f3 if invested else 0.0):
                 return Action("call")
             return Action("fold")
 
@@ -1877,7 +1952,7 @@ class Bot:
         n = len(s.players)
         bb = s.big_blind
         ctx = {}
-        events = classify(s.history, bb, ctx=ctx, now=s.street)
+        events = classify(s.history, bb, ctx=ctx, n=n, now=s.street)
         roles = self._roles(s, events)
         st = s.street
         P = float(s.pot)
@@ -1923,7 +1998,7 @@ class Bot:
         # a starter bot that has raised never folds and bets every street, so the stack goes in on the river
         wait = barrel and st < 3 and s.my_stack > P
         big = barrel or all(roles.get(v) or self.model.sticky(v) for v in ranges)
-        tag = {v: line(v, 2 if c > 0 else 1, ctx["agg"], ctx["stuck"], ctx["checked"], ctx["firm"])
+        tag = {v: line(v, 2 if c > 0 else 1, ctx["agg"], ctx["stuck"], ctx["checked"], ctx["firm"], ctx["bold"])
                for v in ranges}
 
         def response(sit, chips, x, ref):
@@ -2093,6 +2168,7 @@ class Agent:
     def on_table_start(self, info):
         self.hands = info.get("hands", 1000)
         self.bank = self.BANK * max(1.0, self.hands / 1000.0)
+        self.bot.seats = info.get("num_players") or 0
         if not self.CALIBRATE:
             return
         try:
