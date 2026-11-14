@@ -6,7 +6,7 @@ import time
 
 sys.path.insert(0, ".")
 from arena.engine import Table
-from arena.rivals import KIT, RIVALS, STRONG
+from arena.rivals import RIVALS, STRONG
 from pokerbot import Bot
 
 BB = 20
