@@ -1158,7 +1158,10 @@ class Bot:
         except Exception:
             if self.strict:
                 raise
-            a = Action("fold")
+            try:
+                a = self._quick(s)
+            except Exception:
+                a = Action("fold")
         return self._legal(s, a)
 
     def end_hand(self, history=None, showdown=None):
@@ -1173,6 +1176,38 @@ class Bot:
 
     def _late(self):
         return self.deadline is not None and perf_counter() > self.deadline
+
+    def _quick(self, s):
+        c = s.to_call
+        if c <= 0:
+            return Action("check")
+        odds = c / (s.pot + c)
+        many = len(s.active) > 2
+        if not s.board:
+            p = percentile(*s.hole)
+            ok = p < 0.03 or (p < 0.08 and odds < 0.42) or (p < 0.2 and odds < 0.25 and not many)
+            return Action("call") if ok else Action("fold")
+        board = list(s.board)
+        ranks = [x >> 2 for x in board]
+        v = evaluate(list(s.hole) + board)
+        cat = v >> 20
+        if len(board) == 5:
+            base = evaluate(board) >> 20
+        else:
+            cnt = sorted((ranks.count(r) for r in set(ranks)), reverse=True)
+            base = (3 if cnt[0] >= 3 else 2 if cnt[0] == 2 and len(cnt) > 1 and cnt[1] == 2
+                    else 1 if cnt[0] == 2 else 0)
+        gain = cat - base
+        if gain >= 2 or (gain == 1 and cat >= 3):
+            return Action("call")
+        if gain == 1:
+            mine = v >> 16 & 15
+            if cat == 2 and ranks.count(mine) >= 2:
+                mine = v >> 12 & 15
+            limit = (0.25 if many else 0.34) if mine >= max(ranks) else (0.15 if many else 0.2)
+        else:
+            limit = 0.07 if many else 0.1
+        return Action("call") if odds <= limit else Action("fold")
 
     def _trials(self, opponents):
         return max(16, int(self.trials * self.scale * min(1.0, 3.0 / (1 + opponents))))
@@ -1324,14 +1359,15 @@ class Bot:
                 return a
 
         if raises and (s.to_call >= 0.3 * s.my_stack or raises[-1].jam or level >= 25 * bb):
-            ranges = self._ranges(s, events, self._roles(s, events))
+            roles = self._roles(s, events)
+            ranges = self._ranges(s, events, roles)
             committed = [w for v, w in ranges.items()
                          if any(e.player == v and e.act in ("raise", "call") for e in events)]
             against = committed or list(ranges.values())
             sim = simulate(s.hole, [], self._sample, against, self._trials(len(against)),
                            self.rng, self.deadline)
-            if not sim:
-                return Action("fold")
+            if not sim or (len(sim) < 12 and self._late() and not any(roles.values())):
+                return self._quick(s)
             eq = sim_equity(sim)
             if eq * (s.pot + s.to_call) - s.to_call > 0.04 * s.pot:
                 if eq > 0.62:
@@ -1432,8 +1468,8 @@ class Bot:
         else:
             sim = simulate(s.hole, s.board, sample, rl, self._trials(len(rl)), self.rng,
                            self.deadline)
-            if not sim:
-                return Action("fold")
+            if not sim or (len(sim) < 12 and self._late() and not any(roles.values())):
+                return self._quick(s)
             eq_with = lambda mults=None: sim_equity(sim, mults)
         eq = eq_with()
         pure = all(roles.get(v) for v in ranges)
@@ -1604,6 +1640,7 @@ class Agent:
         self.base_trials = self.bot.trials
         self.spent = 0.0
         self.hands = 1000
+        self.bank = self.BANK
         self.speed = 1.0
         self.heavy = self.TARGET
         self.seen = {"cal": 0.0, "clock": 0.0, "end": 0.0, "endmax": 0.0, "late": 0, "told": False,
@@ -1611,6 +1648,7 @@ class Agent:
 
     def on_table_start(self, info):
         self.hands = info.get("hands", 1000)
+        self.bank = self.BANK * max(1.0, self.hands / 1000.0)
         if not self.CALIBRATE:
             return
         try:
@@ -1632,7 +1670,7 @@ class Agent:
         bot = self.bot
         try:
             left = max(1, self.hands - state.get("hand_number", 1) + 1)
-            per_hand = (self.BANK - self.spent) / left
+            per_hand = (self.bank - self.spent) / left
             bot.trials = (self.base_trials if per_hand > 0.004 else
                           45 if per_hand > 0.002 else 24 if per_hand > 0.0008 else 0)
             if bot.trials == 0:

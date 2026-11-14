@@ -82,6 +82,7 @@ class Agent:
         self.base_trials = self.bot.trials
         self.spent = 0.0
         self.hands = 1000
+        self.bank = self.BANK
         self.speed = 1.0
         self.heavy = self.TARGET
         self.seen = {"cal": 0.0, "clock": 0.0, "end": 0.0, "endmax": 0.0, "late": 0, "told": False,
@@ -89,6 +90,7 @@ class Agent:
 
     def on_table_start(self, info):
         self.hands = info.get("hands", 1000)
+        self.bank = self.BANK * max(1.0, self.hands / 1000.0)
         if not self.CALIBRATE:
             return
         try:
@@ -110,7 +112,7 @@ class Agent:
         bot = self.bot
         try:
             left = max(1, self.hands - state.get("hand_number", 1) + 1)
-            per_hand = (self.BANK - self.spent) / left
+            per_hand = (self.bank - self.spent) / left
             bot.trials = (self.base_trials if per_hand > 0.004 else
                           45 if per_hand > 0.002 else 24 if per_hand > 0.0008 else 0)
             if bot.trials == 0:
