@@ -14,7 +14,7 @@ A no-limit hold'em bot for the Imperial AI Hack poker track: 2,000-chip stacks r
 
 ## Results
 
-Saturday's counted rounds at the hack (real opponents, 1,000 hands a round): a mean of +62 bb/100 over the first 30 rounds, first at the table in 13 and in the top two in 17, with three losing rounds. A round took 2.1 to 4.9 s of the 10 s thinking bank and lost 0 to 6 decisions to the 10 ms limit.
+Saturday's counted rounds at the hack (real opponents, 1,000 hands a round): a mean of +43 bb/100 over all 54 rounds, first at the table in 17 and in the top two in 28, with seven losing rounds. The first 31 rounds averaged +61; from round 32 the tables were almost all eight-player with no weak or starter bots left, and the last 23 averaged +20. A round took 1.8 to 4.9 s of the 10 s thinking bank, with no errors and the bank never emptied; 80 decisions in all were lost to the 10 ms limit.
 
 Local check on an eight-player table in the organisers' state format (`arena/kitlike.py`), 1,000-hand rounds against stand-ins for the house bots plus tighter opponents:
 
