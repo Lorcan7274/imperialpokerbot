@@ -78,7 +78,7 @@ class Bot:
     POSW = False
     ANY3 = 0.8
     LIGHT_OBS = 0
-    LIGHT_RISK = 0.75
+    LIGHT_RISK = 1.0
     PLAN = True
     MILK = True
     KEEP = True
@@ -482,18 +482,26 @@ class Bot:
             # an unusually large open is a narrower range, so fewer hands re-raise it for value
             if p < 0.045 * width * min(1.0, 3.5 * bb / level):
                 return self._raise(s, to)
-            if p < (0.24 if s.my_bet >= bb else 0.11) * width * sizeadj:
+            limit = (0.24 if s.my_bet >= bb else 0.11) * width * sizeadj
+            # in the real rounds calls behind other callers lost, and so did loose calls of early-seat opens
+            if any(e.act == "call" and e.player not in clones for e in events):
+                limit *= 0.6
+            if raises[0].sit == "unopened":
+                limit = min(limit, 0.28)
+            if p < limit:
                 return Action("call")
             limped = {e.player for e in events if e.act == "call" and e.player in clones}
             if self.LIGHT3 and self.model.opp[(r, "re_raised")] >= self.LIGHT_OBS and all(
                     e.act == "fold" or e.player == r or e.player in limped for e in events):
-                ff = freq(r, "re_raised", "fold", n)
+                sure = ff = freq(r, "re_raised", "fold", n)
                 for v in villains:
                     # a starter bot that limped folds to any re-raise
                     if v != r and v not in limped:
                         ff *= 0.664 if v in clones else 0.94
-                # a large open is a stronger range and makes the re-raise too dear to try light
+                # in real rounds these paid only from the big blind or against an opener seen folding 85% or more,
+                # and never against a large open, which is a stronger range
                 if (p < (0.6 if ff < self.ANY3 else 1.0) and level <= 4.5 * bb
+                        and (sure >= 0.85 or s.my_bet >= bb)
                         and ff * s.pot > (1 - ff) * self.LIGHT_RISK * (to - s.my_bet) + 0.1 * s.pot):
                     return Action("raise", to)
             return Action("fold")
@@ -602,6 +610,10 @@ class Bot:
         tag = {v: line(v, 2 if c > 0 else 1, ctx["agg"], ctx["stuck"], ctx["checked"], ctx["firm"], ctx["bold"])
                for v in ranges}
 
+        # in the real rounds a bet in a re-raised pot folded out half as many hands as in a single-raised one
+        pre = sum(1 for e in events if e.street == 0 and e.act == "raise")
+        firmer = 1.0 if pre < 2 else (0.55, 0.7, 0.85)[st - 1] if pre == 2 else 0.4
+
         def response(sit, chips, x, ref):
             phi = 1.0
             mults = []
@@ -613,7 +625,7 @@ class Bot:
                 elif role == "weak":
                     ff = 1.0 if chips > 2 * bb else 0.0
                 else:
-                    ff = clamp(freq(v, sit + tag[v], "fold", n) * (x / ref) ** 0.7, 0.02, 0.95)
+                    ff = clamp(freq(v, sit + tag[v], "fold", n) * (x / ref) ** 0.7 * firmer, 0.02, 0.95)
                     exact = False
                 phi *= ff
                 mults.append(keep_top(w, order, 1 - ff, 0.02) if 0.0 < ff < 1.0 else None)
