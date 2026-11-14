@@ -582,11 +582,12 @@ class Rival(Base):
 
     def narrow(self, w, order, p, st, kind, frac, init):
         f = self.freq
+        over = min(1.0, max(frac, 0.25) ** -0.5)
         if kind == "bet":
             x = clamp(f(p, "bet", st, init) * (0.66 / max(frac, 0.25)) ** 0.5, 0.08, 0.95)
-            shape(w, order, 0.0, x, 1.0, _BET_FLOOR[st - 1])
+            shape(w, order, 0.0, x, 1.0, _BET_FLOOR[st - 1] * over)
         elif kind == "raise":
-            shape(w, order, 0.0, 1.3 * f(p, "raise", st, init), 1.0, _RAISE_FLOOR[st - 1])
+            shape(w, order, 0.0, 1.3 * f(p, "raise", st, init), 1.0, _RAISE_FLOOR[st - 1] * over)
         elif kind == "call":
             ff = clamp(f(p, "fold", st, init) * (frac / 0.4) ** 0.5, 0.05, 0.9)
             shape(w, order, f(p, "raise", st, init), 1.0 - ff, 0.55, 0.06)
@@ -782,7 +783,7 @@ class TightIsoA(Rival):
         need = c / (p + c)
         if st < 3 and eq >= 0.84 ** x and _raisable(s):
             return self.bet(s, 0.8)
-        if eq >= need + 0.15 + 0.06 * min(2.0, c / max(1, p - c)):
+        if eq >= need + 0.15 + 0.06 * min(4.0, c / max(1, p - c)):
             return Action("call")
         return Action("fold")
 
@@ -843,9 +844,9 @@ class TightIsoB(Rival):
         if cls >= 6:
             return self.jam(s) if st == 1 and ratio >= 0.5 else Action("call")
         if cls >= 4:
-            return Action("call")
+            return Action("call") if ratio <= (3.0 if cls == 5 else 1.5) else Action("fold")
         if cls == 3:
-            return Action("call") if ratio <= 1.2 else Action("fold")
+            return Action("call") if ratio <= 1.0 else Action("fold")
         if cls == 2 and st < 3 and ratio <= 0.8:
             return Action("call")
         if outs >= 8 and c / (p + c) <= 0.34:
@@ -1476,7 +1477,7 @@ class EqBot(Rival):
                 return self.bet(s, 0.5)
             return Action("check")
         ratio = c / max(1, pot - c)
-        adj = eq - 0.08 - 0.12 * min(1.5, ratio) - 0.04 * (st - 1) - (0.1 if v.nr >= 2 else 0.0)
+        adj = eq - 0.08 - 0.1 * min(3.0, ratio) - 0.04 * (st - 1) - (0.1 if v.nr >= 2 else 0.0)
         if adj >= 0.8 ** x and _raisable(s):
             return self.bet(s, 0.75)
         return Action("call") if adj >= c / (pot + c) + 0.02 else Action("fold")

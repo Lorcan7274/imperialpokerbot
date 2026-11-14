@@ -197,6 +197,18 @@ def fault(action, amount, state):
     return None
 
 
+def starter_move(state):
+    ranks = sorted("23456789TJQKA".index(c[0]) for c in state["hole_cards"])
+    strong = ranks[0] == ranks[1] or ranks[1] >= 11
+    if strong and "raise" in state["legal_actions"]:
+        return "raise", min(state["min_raise_to"] + state["pot"] // 2, state["max_raise_to"])
+    if "check" in state["legal_actions"]:
+        return "check", 0
+    if state["to_call"] <= 2 * state["big_blind"] or strong:
+        return "call", state["to_call"]
+    return "fold", 0
+
+
 def load(path):
     spec = importlib.util.spec_from_file_location("bot", path)
     mod = importlib.util.module_from_spec(spec)
@@ -220,8 +232,7 @@ def trap(path):
 
 
 def skew(mod, factor):
-    origin = now()
-    fast = lambda: origin + factor * (now() - origin)
+    fast = lambda: factor * cpu()
     clock = type(time)("time")
     vars(clock).update(vars(time), perf_counter=fast, monotonic=fast)
     for name, value in list(vars(mod).items()):
@@ -264,12 +275,12 @@ def replay_round(job):
     # freezing keeps this tool's own heap out of the bot's garbage collections, as in the bare runner
     gc.collect()
     gc.freeze()
-    t = now()
+    c0 = cpu()
     mod = load(a.bundle)
-    loaded = now() - t
+    loaded = cpu() - c0
     caught = trap(a.bundle)
     if a.emulate:
-        skew(mod, a.factor)
+        skew(mod, a.emulate)
     spent = meter(mod) if a.explain else {}
     agent = mod.Agent()
     bot = getattr(agent, "bot", None)
@@ -301,10 +312,11 @@ def replay_round(job):
             "hands": meta.get("hands", len(hands)), "starting_stack": first["start_stacks"][me],
             "stacks_reset_each_hand": True, "small_blind": first["sb"], "big_blind": first["bb"],
             "betting": "no_limit", "raise_cap": None}
-    started = call("table start", agent.on_table_start, info)[1] if hasattr(agent, "on_table_start") else 0.0
+    started = call("table start", agent.on_table_start, info)[2] if hasattr(agent, "on_table_start") else 0.0
     speed0 = getattr(agent, "speed", None)
     flags = {s: {"first": None, "on": 0} for s in range(len(teams)) if s != me}
-    fit = [0, 0]
+    fit = [0, 0, 0, 0]
+    odd = []
     rebuilt = 0
     tag = os.path.basename(path).rsplit("_", 1)[-1].split(".")[0]
     for rec in hands:
@@ -320,6 +332,13 @@ def replay_round(job):
                     fit[1] += 1
                     fit[0] += old_to == min(state["min_raise_to"] + state["pot"] // 2,
                                             state["max_raise_to"])
+                if seat in starters and state["hole_cards"]:
+                    want = starter_move(state)
+                    fit[3] += 1
+                    fit[2] += want == (old, old_to)
+                    if want != (old, old_to):
+                        odd.append("hand %d seat %d %s with %s: played %s %d, the starter code says %s %d" % (
+                            (no, seat, state["street"], "".join(state["hole_cards"]), old, old_to) + want))
                 continue
             # the runner hands the bot a JSON-decoded copy and encodes its reply; both count as its time
             line = json.dumps({"id": len(decisions) + 1, "type": "act", "state": state})
@@ -341,9 +360,11 @@ def replay_round(job):
                  "nth": seen[street], "opps": state["folded"].count(False) - 1,
                  "acts": len(state["history"]) - 2, "to_call": state["to_call"],
                  "pot": state["pot"], "cards": "".join(state["hole_cards"] + ["|"] + state["board"]),
-                 "speed": getattr(agent, "speed", None), "parts": dict(spent)}
+                 "speed": getattr(agent, "speed", None)}
+            if spent:
+                d["parts"] = dict(spent)
             if not d["acts"] and ends:
-                d["end"] = ends[-1]
+                d["end_wall"], d["end_cpu"] = ends[-1]
             decisions.append(d)
             same = same and new == old
             seen[street] += 1
@@ -364,7 +385,7 @@ def replay_round(job):
     return {"file": os.path.basename(path), "seat": me, "teams": teams, "meta": meta,
             "hands": len(hands), "decisions": decisions, "ends": ends, "loaded": loaded,
             "started": started, "speed0": speed0, "errors": errors, "problems": problems,
-            "fit": fit, "rebuilt": rebuilt, "flags": flags, "can_flag": bool(is_clone)}
+            "fit": fit, "odd": odd, "rebuilt": rebuilt, "flags": flags, "can_flag": bool(is_clone)}
 
 
 def pick(xs, q):
@@ -381,8 +402,8 @@ def timings(ds, ends, k, a):
             for i, name in enumerate(STREETS)]
     rows.append(("all", [(d["wall"], d["cpu"]) for d in ds]))
     rows.append(("hand_end", ends))
-    rows.append(("end+lead", [(d["wall"] + d["end"][0], d["cpu"] + d["end"][1])
-                              for d in ds if "end" in d]))
+    rows.append(("end+lead", [(d["wall"] + d["end_wall"], d["cpu"] + d["end_cpu"])
+                              for d in ds if "end_cpu" in d]))
     print("   ms %-9s      n | wall mean     p50     p99     max |  cpu mean     p50     p99     max"
           " | over %g ms: wall cpu" % ("x%g" % k if k != 1 else "as run", a.budget))
     for label, pairs in rows:
@@ -455,7 +476,7 @@ def slowest(ds, a):
     total = sum(d["wall"] for d in ds)
     parts = {}
     for d in ds:
-        for k, (seconds, calls) in d["parts"].items():
+        for k, (seconds, calls) in d.get("parts", {}).items():
             s, c = parts.get(k, (0.0, 0))
             parts[k] = (s + seconds, c + calls)
     if parts:
@@ -467,7 +488,7 @@ def slowest(ds, a):
         a.factor, " | parts in ms" if parts else ""))
     for d in sorted(ds, key=lambda d: -d["cpu"])[:a.top]:
         inner = "  ".join("%s %.2f/%d" % (k, 1000 * s, c) for k, (s, c) in sorted(
-            d["parts"].items(), key=lambda kv: -kv[1][0])[:5])
+            d.get("parts", {}).items(), key=lambda kv: -kv[1][0])[:5])
         print("   %6.3f (%5.2f) | %6.3f | %s #%-4d %-7s act %d of street, %d opp, %2d acts before, "
               "to call %4d, pot %4d, %s | %s > %s %s%s" % (
                   1000 * d["cpu"], 1000 * a.factor * d["cpu"], 1000 * d["wall"], d["round"], d["hand"],
@@ -493,11 +514,12 @@ def show(r, a):
             meta.get("version"), meta.get("bb100", float("nan")), meta.get("timeouts"),
             meta.get("errors"), meta.get("think_s")))
     print("   engine check: %d actions rebuilt, %d disagree with the record; starter raise sizes "
-          "reproduced %d of %d" % (r["rebuilt"], len(r["problems"]), r["fit"][0], r["fit"][1]))
-    for p in r["problems"][:10]:
+          "reproduced %d of %d, starter actions on shown hands %d of %d" % (
+              (r["rebuilt"], len(r["problems"])) + tuple(r["fit"])))
+    for p in r["problems"][:10] + r["odd"][:10]:
         print("      " + p)
     speeds = [d["speed"] for d in ds if d["speed"] is not None]
-    print("   load %.1f ms, table start %.1f ms (x%g: %.0f and %.0f ms)%s" % (
+    print("   cpu to load %.0f ms, table start %.1f ms (x%g: %.0f and %.0f ms)%s" % (
         1000 * r["loaded"], 1000 * r["started"], a.factor, 1000 * a.factor * r["loaded"],
         1000 * a.factor * r["started"],
         "; speed %.2f at start, %.2f lowest, %.2f at the end" % (r["speed0"], min(speeds), speeds[-1])
@@ -520,10 +542,11 @@ def overall(rounds, a):
     known = a.starters.split(",")
     print("== ALL %d ROUNDS  %s  %d decisions%s%s" % (
         len(rounds), os.path.basename(a.bundle), len(ds),
-        "  bot clock x%g" % a.factor if a.emulate else "", "  metered" if a.explain else ""))
+        "  bot clock = %g x cpu time" % a.emulate if a.emulate else "", "  metered" if a.explain else ""))
     print("   engine check: %d actions rebuilt, %d disagree with the record; starter raise sizes "
-          "reproduced %d of %d" % (sum(r["rebuilt"] for r in rounds), sum(len(r["problems"]) for r in rounds),
-                                   sum(r["fit"][0] for r in rounds), sum(r["fit"][1] for r in rounds)))
+          "reproduced %d of %d, starter actions on shown hands %d of %d" % (
+              (sum(r["rebuilt"] for r in rounds), sum(len(r["problems"]) for r in rounds))
+              + tuple(sum(r["fit"][i] for r in rounds) for i in range(4))))
     trouble([("%s %s" % (r["file"], w), t) for r in rounds for w, t in r["errors"]], ds)
     clock_report(ds, ends, a, len(rounds))
     slowest(ds, a)
@@ -555,9 +578,10 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--factor", type=float, default=4.0, help="how many times slower the server is")
     ap.add_argument("--budget", type=float, default=8.0, help="ms a decision may take on the server")
-    ap.add_argument("--emulate", action="store_true",
-                    help="run the bot's own clock FACTOR times fast, so its calibration and time "
-                         "guard react as they would on the server")
+    ap.add_argument("--emulate", type=float, default=0.0, metavar="K",
+                    help="give the bot a clock that is K x this process's cpu time, so its "
+                         "calibration and time guard react as on a quiet machine K times slower "
+                         "(1 = this machine with nobody else on it, 4 = the server)")
     ap.add_argument("--explain", action="store_true",
                     help="time the bundle's main functions inside every decision (adds overhead)")
     ap.add_argument("--top", type=int, default=12, help="how many of the slowest decisions to list")
@@ -570,7 +594,9 @@ def main():
                               if not os.path.basename(p).startswith("_"))
     if not paths:
         raise SystemExit("no round files")
-    print("bundle %s  python %s  seed %d" % (a.bundle, sys.version.split()[0], a.seed))
+    print("bundle %s  python %s  seed %d  load average %.1f on %d cores%s" % (
+        a.bundle, sys.version.split()[0], a.seed, os.getloadavg()[0], os.cpu_count(),
+        "  bot clock = %g x cpu time" % a.emulate if a.emulate else ""))
     rounds = []
     with multiprocessing.get_context("spawn").Pool(1, maxtasksperchild=1) as pool:
         for r in pool.imap(replay_round, [(p, a) for p in paths]):
