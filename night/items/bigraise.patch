@@ -1,0 +1,110 @@
+diff --git a/pokerbot/bot.py b/pokerbot/bot.py
+index 49e6429..85a434c 100644
+--- a/pokerbot/bot.py
++++ b/pokerbot/bot.py
+@@ -455,6 +455,7 @@ class Bot:
+         freq = self.model.freq
+         x = 1.0
+         jam = None
++        paid = False
+         for e in events:
+             if e.player == v and e.act == "raise":
+                 x *= freq(v, e.sit, "jam" if e.jam else "raise", n)
+@@ -462,8 +463,9 @@ class Bot:
+                     jam = jam_kind(e.sit)
+             elif e.player == v and e.act == "call":
+                 x *= min(1.0, freq(v, e.sit, "raise", n) + freq(v, e.sit, "call", n))
++                paid = e.rec.to >= 2000
+         if jam:
+-            # shown all-in hands in this field run about twice as wide as the frequency suggests;
++            # the frequency counts as two shown hands and the field's shown shoves, a 6% range, as two more;
+             # the same kind of shove counts in full, the player's other shoves at half weight
+             seen = shown = 0.0
+             for kind in "o34":
+@@ -473,7 +475,34 @@ class Bot:
+                     seen += share * t[0]
+                     shown += share * t[1]
+             x = (2 * x + 2 * (shown + 0.06)) / (4 + seen)
+-        return x, jam
++        if paid:
++            # real callers of a shove showed a shover's range, half of it tens or better, not a caller's
++            x = min(x, 0.07)
++        return x, jam or paid
++
++    def _versus(self, s, events, n, name, into, clones, cut):
++        # equity all-in before the flop; cut is the share of its range an earlier raiser stays in with
++        if len(into) == 1 and into[0] not in clones:
++            eq = topx(name, self._width(into[0], events, n)[0])
++            return max(eq, 0.5) if name in ("AA", "KK") else eq
++        roles = self._roles(s, events)
++        ranges = self._ranges(s, events, roles)
++        for v in into:
++            x, jam = self._width(v, events, n)
++            if (jam or v in cut) and not roles.get(v):
++                if v in cut:
++                    x = min(x * cut[v], 0.07)
++                w = list(self._sample.base)
++                narrow(w, self._sample.pre_order, 0, x, 1, 0.15 * x, 0.13)
++                ranges[v] = w
++        against = [ranges[v] for v in into] or list(ranges.values())
++        sim = simulate(s.hole, [], self._sample, against, self._trials(len(against), True),
++                       self.rng, self.deadline)
++        if not sim or (len(sim) < 12 and self._late() and not any(roles.values())):
++            return None
++        eq = sim_equity(sim)
++        # a few sampled hands stand for a narrow range, and aces and kings are never a fold on such a draw
++        return max(eq, 0.4) if name in ("AA", "KK") else eq
+ 
+     def _preflop(self, s):
+         bb = s.big_blind
+@@ -500,29 +529,28 @@ class Bot:
+             bets = {r.player: r.to for r in s.history}
+             keep = () if name in ("AA", "KK") else {e.player for e in raises}
+             into = [v for v in villains if bets.get(v, 0) >= level or v in keep]
+-            if len(into) == 1 and into[0] not in clones:
+-                eq = topx(name, self._width(into[0], events, n)[0])
+-                if name in ("AA", "KK"):
+-                    eq = max(eq, 0.5)
+-            else:
+-                # several players all-in show premium hands, and a short simulation can flatter a weak one
+-                if len(into) > 1 and s.to_call >= 0.4 * s.my_stack and p > (
+-                        0.25 if any(v in clones for v in into) else 0.12):
+-                    return Action("fold")
+-                roles = self._roles(s, events)
+-                ranges = self._ranges(s, events, roles)
+-                for v in into:
+-                    x, jam = self._width(v, events, n)
+-                    if jam and not roles.get(v):
+-                        w = list(self._sample.base)
+-                        narrow(w, self._sample.pre_order, 0, x, 1, 0.15 * x, 0.13)
+-                        ranges[v] = w
+-                against = [ranges[v] for v in into] or list(ranges.values())
+-                sim = simulate(s.hole, [], self._sample, against, self._trials(len(against), True),
+-                               self.rng, self.deadline)
+-                if not sim or (len(sim) < 12 and self._late() and not any(roles.values())):
++            # several players all-in show premium hands, and a short simulation can flatter a weak one
++            if len(into) > 1 and s.to_call >= 0.4 * s.my_stack and p > (
++                    0.25 if any(v in clones for v in into) else 0.12):
++                return Action("fold")
++            # against a shove a real raiser yet to act stayed in more often the more it had in: one opener in
++            # eight, half of those with a quarter of the stack in; a starter bot always calls
++            stay = {v: clamp(0.08 + 1.9 * bets[v] / level, 0.1, 0.85) for v in into
++                    if bets[v] < level and v not in clones} if s.to_call >= s.my_stack else {}
++            eq = self._versus(s, events, n, name, [v for v in into if v not in stay], clones, {})
++            if eq is None:
++                return self._quick(s)
++            if stay:
++                # either they fold, or they stay with the best of their ranges and their chips in the pot
++                rest = self._versus(s, events, n, name, into, clones, stay)
++                if rest is None:
+                     return self._quick(s)
+-                eq = sim_equity(sim)
++                gone = 1.0
++                for q in stay.values():
++                    gone *= 1.0 - q
++                more = sum(level - bets[v] for v in stay)
++                won = gone * eq * (s.pot + s.to_call) + (1 - gone) * rest * (s.pot + more + s.to_call)
++                return Action("call") if won - s.to_call > 0.04 * s.pot else Action("fold")
+             if eq > 0.62:
+                 return Action("raise", s.max_raise_to)
+             # a call that leaves chips behind has to be played out of the hand's weak spots after the flop

@@ -1,0 +1,209 @@
+diff --git a/pokerbot/bot.py b/pokerbot/bot.py
+index 49e6429..20285ae 100644
+--- a/pokerbot/bot.py
++++ b/pokerbot/bot.py
+@@ -5,7 +5,7 @@ from .cards import evaluate
+ from .clone_table import CLONE1, CLONE2
+ from .model import Model, classify, jam_kind, line, size_bucket, tell_key
+ from .preflop import class_name, percentile
+-from .ranges import Exact, Sample, connects, keep_top, made, narrow, river_equity, sim_equity, simulate
++from .ranges import Sample, connects, keep_top, made, narrow, river_equity, sim_equity, simulate
+ from .ranges import runout_equity, strong_hand
+ from .state import Action
+ from .topx_table import TOPX, TOPX_GRID
+@@ -27,19 +27,6 @@ WEAK_ALL = [(a, b) for a in range(52) for b in range(a)
+             if not (a >> 2 == b >> 2 or a >> 2 >= 11 or b >> 2 >= 11)]
+ 
+ 
+-def listed_equity(hole, board, combos, weights):
+-    hv = evaluate(list(hole) + list(board))
+-    won = tot = 0.0
+-    for (x, y), w in zip(combos, weights):
+-        v = evaluate([x, y] + list(board))
+-        tot += w
+-        if hv > v:
+-            won += w
+-        elif hv == v:
+-            won += 0.5 * w
+-    return won / tot if tot else 0.5
+-
+-
+ def strong_river_equity(hole, board):
+     board = list(board)
+     dead = set(hole) | set(board)
+@@ -235,17 +222,15 @@ class Bot:
+         return roles
+ 
+     def _hit_range(self, s, v):
+-        # the starter variant's range once it wakes up after the flop: weak hands that hit the board hard,
+-        # plus the few real raising hands that missed their raise before the flop on a timeout
++        # the starter variant's range once it wakes up after the flop: weak hands that hit the board hard on that
++        # street, since one that hit earlier raised then; all ten it showed in the real rounds were such hands
++        st = self._hits[v]
+         dead = set(s.hole) | set(s.board)
+-        br = [c >> 2 for c in s.board[:BOARD_LEN[self._hits[v]]]]
++        br = [c >> 2 for c in s.board[:BOARD_LEN[st]]]
+         hit = [(a, b) for a, b in WEAK_ALL
+                if a not in dead and b not in dead and connects(a >> 2, b >> 2, br)]
+-        if not hit:
+-            return None
+-        late = [xy for xy in STRONG_ALL[::8] if xy[0] not in dead and xy[1] not in dead]
+-        slow = max(0.001, self.model.viol[v] / max(1, self.model.acts[v]))
+-        return hit + late, [1.0] * len(hit) + [12.6 * slow * len(hit) / max(1, len(late))] * len(late)
++        new = [xy for xy in hit if not connects(xy[0] >> 2, xy[1] >> 2, br[:-1])] if st > 1 else hit
++        return new or hit
+ 
+     def _update(self, w, e, s, n, sample, fired=False):
+         f = lambda act: self.model.freq(e.player, e.sit, act, n)
+@@ -331,6 +316,12 @@ class Bot:
+             self._sample = Sample(s.hole, self.rng, max(70, int(self.samples * self.scale)))
+         sample = self._sample
+         n = len(s.players)
++        for v in list(self._hits):
++            # the sample holds a handful of these hands at best, so the whole list joins it
++            if v not in sample.added:
++                sample.add(v, self._hit_range(s, v))
++            if sample.added[v][0] == sample.added[v][1]:
++                del self._hits[v]
+         vals = sample.board(s.board)[0] if s.board else None
+         seen = {}
+         for e in events:
+@@ -341,11 +332,8 @@ class Bot:
+                 continue
+             role = roles.get(v)
+             if role == "strong" and v in self._hits:
+-                br = [c >> 2 for c in s.board[:BOARD_LEN[self._hits[v]]]]
+-                w = [0.0 if k else x * connects(xy[0] >> 2, xy[1] >> 2, br)
+-                     for x, k, xy in zip(sample.base, sample.strong, sample.combos)]
+-                if not any(w):
+-                    w = [x if k else 0.0 for x, k in zip(sample.base, sample.strong)]
++                lo, hi = sample.added[v]
++                w = [0.0] * lo + [1.0] * (hi - lo) + [0.0] * (sample.size - hi)
+             elif role == "strong":
+                 w = [x if k else 0.0 for x, k in zip(sample.base, sample.strong)]
+             elif role == "weak":
+@@ -366,7 +354,7 @@ class Bot:
+             out[v] = w
+         return out
+ 
+-    def _river_plan(self, s, w, hands=None):
++    def _river_plan(self, s, w):
+         # value of calling a raising starter bot down to the river, where it pays off a shove with its whole range
+         bb = s.big_blind
+         board = list(s.board)
+@@ -397,7 +385,7 @@ class Bot:
+             stack -= turn
+             cost += turn
+         bet = min(stack, bb + pot // 2)
+-        eqs = runout_equity(s.hole, board, runs, hands or self._sample, w, self.deadline)
++        eqs = runout_equity(s.hole, board, runs, self._sample, w, self.deadline)
+         if len(eqs) < 6:
+             return None
+         total = 0.0
+@@ -689,11 +677,7 @@ class Bot:
+                 and all(roles.get(v) for v in ranges)):
+             if c <= 0:
+                 return Action("check")
+-            listed = self._hit_range(s, raisers[0]) if raisers[0] in self._hits else None
+-            if listed:
+-                ev = self._river_plan(s, listed[1], Exact(listed[0]))
+-            else:
+-                ev = self._river_plan(s, ranges[raisers[0]])
++            ev = self._river_plan(s, ranges[raisers[0]])
+             if ev is None:
+                 return self._quick(s)
+             return Action("call") if ev > 0 else Action("fold")
+@@ -708,9 +692,8 @@ class Bot:
+             eq_with = lambda mults=None: sim_equity(sim, mults)
+         eq = eq_with()
+         pure = all(roles.get(v) for v in ranges)
+-        if st == 3 and len(rl) == 1 and "strong" in roles.values():
+-            listed = self._hit_range(s, raisers[0]) if raisers and raisers[0] in self._hits else None
+-            eq = listed_equity(s.hole, s.board, *listed) if listed else strong_river_equity(s.hole, s.board)
++        if st == 3 and len(rl) == 1 and raisers and raisers[0] not in self._hits:
++            eq = strong_river_equity(s.hole, s.board)
+         ip = self._in_position(s)
+         can_raise = s.max_raise_to > s.my_bet + c and any(
+             s.stacks.get(v, 1) > 0 for v in ranges)
+diff --git a/pokerbot/ranges.py b/pokerbot/ranges.py
+index d7b4b40..f67c759 100644
+--- a/pokerbot/ranges.py
++++ b/pokerbot/ranges.py
+@@ -49,6 +49,20 @@ class Sample:
+         self.pre_order = sorted(range(self.size), key=pct.__getitem__)
+         self._boards = {}
+         self._flags = {}
++        self.added = {}
++
++    def add(self, key, combos):
++        # hands listed for one opponent alone join the sample with no weight for anyone else
++        self.added[key] = (self.size, self.size + len(combos))
++        self.combos += combos
++        self.base += [0.0] * len(combos)
++        self.rank += [RANK_KEY[a] + RANK_KEY[b] for a, b in combos]
++        self.suit += [SUIT_KEY[a] + SUIT_KEY[b] for a, b in combos]
++        self.mask += [1 << a | 1 << b for a, b in combos]
++        self.strong += [False] * len(combos)
++        self.size += len(combos)
++        self._boards.clear()
++        self._flags.clear()
+ 
+     def flags(self, board):
+         hit = self._flags.get(len(board))
+@@ -101,17 +115,6 @@ class Sample:
+         return hit
+ 
+ 
+-class Exact:
+-    """An explicit list of hands, in the layout the run-out routine reads."""
+-
+-    def __init__(self, combos):
+-        self.combos = combos
+-        self.mask = [1 << a | 1 << b for a, b in combos]
+-        self.rank = [RANK_KEY[a] + RANK_KEY[b] for a, b in combos]
+-        self.suit = [SUIT_KEY[a] + SUIT_KEY[b] for a, b in combos]
+-        self.size = len(combos)
+-
+-
+ def connects(a, b, br):
+     # both cards pair the board, or one makes three of a kind
+     return (a in br and b in br) or (a in br and br.count(a) > 1) or (b in br and br.count(b) > 1)
+diff --git a/tests/test_play.py b/tests/test_play.py
+index 8930c73..cc6dd25 100644
+--- a/tests/test_play.py
++++ b/tests/test_play.py
+@@ -4,8 +4,9 @@ import unittest
+ from arena.engine import Table
+ from arena.opponents import ALL
+ from pokerbot import Bot
++from pokerbot.cards import parse_cards
+ from pokerbot.model import Model, classify
+-from pokerbot.state import Rec
++from pokerbot.state import GameState, Rec
+ 
+ 
+ class Timed(Bot):
+@@ -40,6 +41,23 @@ class PlayTest(unittest.TestCase):
+             m.observe(classify(hist, 20), "h")
+         self.assertLess(m.freq("v", "unopened", "raise"), base / 3)
+ 
++    def test_woken_variant_holds_what_hit_this_street(self):
++        bot = Bot(seed=1, strict=True)
++        bot.model.rtot[2] = bot.model.rfit[2] = 8
++        hist = [Rec(0, 0, "sb", 10, 10), Rec(1, 0, "bb", 20, 20), Rec(2, 0, "call", 20, 20),
++                Rec(0, 0, "fold", 0, 10), Rec(1, 0, "check", 0, 20), Rec(1, 1, "check", 0, 0),
++                Rec(2, 1, "check", 0, 0), Rec(1, 2, "check", 0, 0), Rec(2, 2, "raise", 45, 45)]
++        s = GameState(hand_id=1, hero=1, hole=parse_cards("AhAs"), board=parse_cards("7h5d4c3c"), pot=95,
++                      to_call=45, my_bet=0, my_stack=1980, min_raise_to=90, max_raise_to=1980, big_blind=20,
++                      players=[0, 1, 2], active=[1, 2], history=hist, stacks={0: 1990, 1: 1980, 2: 1935})
++        events = classify(hist, 20, n=3, now=2)
++        w = bot._ranges(s, events, bot._roles(s, events))[2]
++        held = [tuple(sorted((a >> 2, b >> 2))) for (a, b), x in zip(bot._sample.combos, w) if x]
++        # a three with the seven, five or four: two pair made by the turn card, not one made on the flop
++        self.assertEqual(set(held), {(1, 2), (1, 3), (1, 5)})
++        self.assertEqual(len(held), 27)
++        self.assertEqual(bot._ranges(s, events, bot._roles(s, events))[2], w)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()

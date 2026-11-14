@@ -1,0 +1,131 @@
+diff --git a/arena/exploiters.py b/arena/exploiters.py
+index 596ee81..757e937 100644
+--- a/arena/exploiters.py
++++ b/arena/exploiters.py
+@@ -174,5 +174,12 @@ class Switcher(Lever):
+     P = dict(switch=150, early=dict(call0=0.6, cont0=0.8), trap=1.0)
+ 
+ 
++class Light3(Lever):
++    """Stand-in for the re-raisers seen on Saturday: re-raises a quarter of opens with weak hands, bets big after, and folds
++    all but its best hands to a raise back."""
++
++    P = dict(b3=0.25, x3=3.0, bluff=0.6, bsize=0.8)
++
++
+ EXPLOITERS = {"tag": Tag, "trapper": Trapper, "prober": Prober, "nitjam": NitJam,
+-              "switcher": Switcher}
++              "switcher": Switcher, "light3": Light3}
+diff --git a/pokerbot/bot.py b/pokerbot/bot.py
+index 49e6429..6d9582c 100644
+--- a/pokerbot/bot.py
++++ b/pokerbot/bot.py
+@@ -104,6 +104,7 @@ class Bot:
+     OPEN_BB = 3.5
+     TELLS = True
+     OFFSUIT = 0.5
++    FOUR = 0.15
+     ONEPAIR = ({"j": 0.5, "J": 0.5},
+                {0: 0.55, 1: 0.55, 2: 0.55, 3: 0.5, 4: 0.38, 5: 0.3, "j": 0.45, "J": 0.35})
+ 
+@@ -628,6 +629,15 @@ class Bot:
+                 return Action("call")
+             if invested and self._priced(s, f3):
+                 return Action("call")
++            # a re-raiser whose latest answer to a raise back was a fold is raised back with a hand that would fold
++            t = self.model.four.get(r)
++            if (self.FOUR and t and t[2] and n > 2 and raises[0].player == s.hero and r not in clones
++                    and all(e.act == "fold" or e.player in (s.hero, r) for e in events)):
++                ff = (t[0] + 0.7) / (t[1] + 1.8)
++                to = 2.3 * level
++                if (to < 0.4 * (s.my_stack + s.my_bet)
++                        and ff * s.pot > (1 - ff) * (to - s.my_bet) + self.FOUR * s.pot):
++                    return Action("raise", to)
+             return Action("fold")
+ 
+         f4 = freq(r, raises[-1].sit, "raise", n)
+diff --git a/pokerbot/model.py b/pokerbot/model.py
+index fb6b71e..3fd6055 100644
+--- a/pokerbot/model.py
++++ b/pokerbot/model.py
+@@ -202,6 +202,7 @@ class Model:
+         self.badshow = defaultdict(int)
+         self.tell = {}
+         self.jamx = {}
++        self.four = {}
+ 
+     def observe(self, events, hero, shown=None, board=None):
+         seen = set()
+@@ -210,6 +211,7 @@ class Model:
+         last = None
+         raises = 0
+         acted = set()
++        three = None
+         for e in events:
+             p = e.player
+             facing = last
+@@ -219,8 +221,19 @@ class Model:
+             if e.street == 0 and e.act == "raise":
+                 last = p
+                 raises += 1
++                if before == 1:
++                    three = p
++                elif before == 2 and e.rec.to >= 1000:
++                    three = None
+             if p == hero:
+                 continue
++            # a re-raiser's answers to an ordinary raise back repeat within a round: folds, answers (both fading), latest
++            if e.street == 0 and before == 3 and p == three:
++                three = None
++                t = self.four.setdefault(p, [0.0, 0.0, False])
++                t[2] = e.act == "fold"
++                t[0] = 0.8 * t[0] + t[2]
++                t[1] = 0.8 * t[1] + 1
+             # some players call a re-raise cold far more often than the field does
+             if e.street == 0 and before == 2 and fresh:
+                 self.opp[(p, "cold3")] += 1
+diff --git a/tests/test_play.py b/tests/test_play.py
+index 8930c73..acdaeb4 100644
+--- a/tests/test_play.py
++++ b/tests/test_play.py
+@@ -4,8 +4,9 @@ import unittest
+ from arena.engine import Table
+ from arena.opponents import ALL
+ from pokerbot import Bot
++from pokerbot.cards import parse_card
+ from pokerbot.model import Model, classify
+-from pokerbot.state import Rec
++from pokerbot.state import GameState, Rec
+ 
+ 
+ class Timed(Bot):
+@@ -40,6 +41,29 @@ class PlayTest(unittest.TestCase):
+             m.observe(classify(hist, 20), "h")
+         self.assertLess(m.freq("v", "unopened", "raise"), base / 3)
+ 
++    def test_raises_back_a_re_raiser_seen_folding(self):
++        bot = Bot(seed=1, strict=True)
++        blinds = [Rec(4, 0, "sb", 10, 10), Rec(5, 0, "bb", 20, 20)]
++        seen = blinds + [Rec(0, 0, "raise", 70, 70)] + [Rec(p, 0, "fold", 0, 0) for p in (1, 2, 3)] + [
++            Rec(4, 0, "fold", 0, 10), Rec(5, 0, "raise", 190, 210), Rec(0, 0, "raise", 410, 480)]
++        hist = blinds + [Rec(p, 0, "fold", 0, 0) for p in (0, 1, 2)] + [
++            Rec(3, 0, "raise", 70, 70), Rec(4, 0, "fold", 0, 10), Rec(5, 0, "raise", 190, 210)]
++        s = GameState(hand_id=1, hero=3, hole=[parse_card("7c"), parse_card("2d")], board=[], pot=310, to_call=140,
++                      my_bet=70, my_stack=1930, min_raise_to=350, max_raise_to=2000, big_blind=20,
++                      players=[4, 5, 0, 1, 2, 3], active=[5, 3], history=hist, stacks={p: 2000 for p in range(6)})
++        self.assertEqual(bot.decide(s).kind, "fold")
++        for _ in range(2):
++            bot.model.observe(classify(seen + [Rec(5, 0, "fold", 0, 210)], 20, n=6), 3)
++        s.hand_id = 2
++        a = bot.decide(s)
++        self.assertEqual((a.kind, a.amount), ("raise", 483))
++        bot.model.observe(classify(seen + [Rec(5, 0, "raise", 1790, 2000)], 20, n=6), 3)
++        s.hand_id = 3
++        self.assertEqual(bot.decide(s).kind, "fold")
++        bot.FOUR = 0
++        bot.model.four[5] = [5.0, 5.0, True]
++        self.assertEqual(bot.decide(s).kind, "fold")
++
+ 
+ if __name__ == "__main__":
+     unittest.main()

@@ -1,0 +1,336 @@
+diff --git a/arena/backtest.py b/arena/backtest.py
+new file mode 100644
+index 0000000..97b7552
+--- /dev/null
++++ b/arena/backtest.py
+@@ -0,0 +1,198 @@
++"""Paired comparison of bundles like abtest.py, with our seat's hands tagged by situation, for backtests."""
++import argparse
++import json
++import math
++import os
++import random
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from arena.abtest import make_agent, registry
++from arena.engine import Table
++from arena.kitlike import KitSeat
++
++BB = 20
++
++
++def tag_hand(hist, me):
++    """What happened to `me` in one hand: situations met (tags), each decision facing a bet (dec), who put chips in,
++    whose flop and turn bets were called."""
++    tags, dec, vol, called = set(), [], set(), set()
++    street = None
++    raises = 0
++    agg = None
++    my_open = False
++    i_bet = False
++    for r in hist:
++        if r.kind in ("sb", "bb"):
++            continue
++        if r.street != street:
++            street = r.street
++            raises = 0
++            agg = None
++            i_bet = False
++        p = r.player
++        if p != me and r.kind in ("call", "raise"):
++            vol.add(p)
++        if p == me:
++            if street == 0:
++                if raises == 0 and r.kind == "raise":
++                    my_open = True
++                    tags.add("open")
++                elif raises and my_open and agg != me:
++                    dec.append("P3" + r.kind[0])
++                elif raises and not my_open:
++                    dec.append("Pv" + r.kind[0])
++                    if r.kind == "raise" and raises == 1:
++                        tags.add("we3bet")
++            elif agg is not None and agg != me:
++                dec.append("%s%d%s" % ("R" if i_bet else "F", street, r.kind[0]))
++                if r.kind == "call":
++                    tags.add("call%d" % street)
++                    if street < 3:
++                        called.add(agg)
++                    if i_bet:
++                        tags.add("callraise%d" % street)
++            elif agg is None:
++                dec.append("B%d%s" % (street, "b" if r.kind == "raise" else "x"))
++            if r.kind == "raise" and street:
++                i_bet = True
++                tags.add("bet%d" % street)
++        if r.kind == "raise":
++            raises += 1
++            if p != me:
++                if street == 0 and my_open:
++                    tags.add("reraised")
++                if street and i_bet:
++                    tags.add("betraised%d" % street)
++            agg = p
++    if "call1" in tags or "call2" in tags:
++        tags.add("call12")
++    return tags, dec, vol, called
++
++
++class Recorder:
++    def __init__(self, inner):
++        self.inner = inner
++        self.hands = []
++
++    def decide(self, s):
++        return self.inner.decide(s)
++
++    def end_hand(self, history, showdown, board=()):
++        self.hands.append((history, showdown))
++        self.inner.end_hand(history, showdown, board)
++
++
++def summarise(hands, nets, me, kind_of):
++    """Per round: chips per tag, decision counts, chips against each kind of opponent (split among those who played)."""
++    tag = {}
++    dec = {}
++    vs = {}
++    vsc = {}
++    for (hist, showdown), x in zip(hands, nets):
++        tags, ds, vol, called = tag_hand(hist, me)
++        for p in called:
++            c = vsc.setdefault(kind_of(p), [0, 0.0])
++            c[0] += 1
++            c[1] += x / len(called)
++        if showdown and me in showdown:
++            tags.add("showdown")
++            if "call12" in tags:
++                tags.add("call12_shown")
++                if x > 0:
++                    tags.add("call12_won")
++        elif any(r.player == me and r.kind != "fold" and r.street for r in hist):
++            tags.add("noshow_postflop")
++        for t in tags:
++            c = tag.setdefault(t, [0, 0.0])
++            c[0] += 1
++            c[1] += x
++        for d in ds:
++            dec[d] = dec.get(d, 0) + 1
++        for p in vol:
++            k = kind_of(p)
++            c = vs.setdefault(k, [0, 0.0])
++            c[0] += 1
++            c[1] += x / len(vol)
++    return {"tag": tag, "dec": dec, "vs": vs, "vsc": vsc}
++
++
++def play_round(job):
++    path, field, seed, hands = job
++    reg = registry()
++    names = ["hero"] + ["%s#%d" % (k, i) for i, k in enumerate(field)]
++    order = list(names)
++    random.Random(seed).shuffle(order)
++    bots = {}
++    for nm in order:
++        if nm == "hero":
++            bots[nm] = rec = Recorder(KitSeat(make_agent(path, seed, False), order, nm, hands))
++            continue
++        kind, i = nm.rsplit("#", 1)
++        if kind.startswith("bot:"):
++            bots[nm] = KitSeat(make_agent(kind[4:], seed * 100 + int(i), False), order, nm, hands)
++        else:
++            bots[nm] = reg[kind](seed=seed * 100 + int(i))
++    table = Table(bots, seed=seed)
++    _, log = table.play(hands)
++    fair = table.fair_log["hero"]
++    out = summarise(rec.hands, fair, "hero", lambda p: os.path.basename(p.rsplit("#", 1)[0]))
++    out["net"] = sum(log["hero"]) / hands
++    out["fair"] = sum(fair) / hands
++    others = {}
++    for nm in names[1:]:
++        k = os.path.basename(nm.rsplit("#", 1)[0])
++        others.setdefault(k, []).append(sum(table.fair_log[nm]) / hands)
++    out["others"] = {k: sum(v) / len(v) for k, v in others.items()}
++    return out
++
++
++def mean_se(xs):
++    n = len(xs)
++    m = sum(xs) / n
++    if n < 2:
++        return m, float("nan")
++    return m, math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1) / n)
++
++
++def expand(spec, bots):
++    field = []
++    for tok in spec.split(","):
++        tok, _, rep = tok.partition("*")
++        if tok.startswith("@"):
++            tok = "bot:" + bots[int(tok[1:])]
++        field += [tok] * int(rep or 1)
++    return field
++
++
++def main():
++    ap = argparse.ArgumentParser(description="Tagged paired comparison; the first bundle is the baseline.")
++    ap.add_argument("--name", required=True)
++    ap.add_argument("--bots", required=True, help="comma list of bundles; @0, @1 ... in the field seat copies")
++    ap.add_argument("--field", required=True)
++    ap.add_argument("--rounds", type=int, default=20)
++    ap.add_argument("--hands", type=int, default=1000)
++    ap.add_argument("--seed", type=int, default=1000)
++    ap.add_argument("--out", default="")
++    a = ap.parse_args()
++    bots = [os.path.abspath(b) for b in a.bots.split(",")]
++    field = expand(a.field, bots)
++    res = {b: [play_round((b, field, a.seed + r, a.hands)) for r in range(a.rounds)] for b in bots}
++    line = {"name": a.name, "field": a.field, "rounds": a.rounds, "hands": a.hands, "seed": a.seed,
++            "bots": bots, "res": [res[b] for b in bots]}
++    if a.out:
++        with open(a.out, "a") as f:
++            f.write(json.dumps(line) + "\n")
++    base = [r["fair"] for r in res[bots[0]]]
++    for b in bots:
++        m, se = mean_se([r["fair"] for r in res[b]])
++        txt = "%s %-14s %-12s %+7.1f se %4.1f" % (a.name, os.path.basename(b), "level", 100 * m / BB, 100 * se / BB)
++        if b != bots[0]:
++            m, se = mean_se([r["fair"] - x for r, x in zip(res[b], base)])
++            txt += "   minus %s %+7.1f se %4.1f" % (os.path.basename(bots[0]), 100 * m / BB, 100 * se / BB)
++        print(txt, flush=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/arena/judge.py b/arena/judge.py
+new file mode 100644
+index 0000000..c2ecc5a
+--- /dev/null
++++ b/arena/judge.py
+@@ -0,0 +1,126 @@
++"""Judges a candidate bundle against the live build: clone tables seated like Saturday's late rounds, the final-table
++field, and self-play against copies of the live build. Thresholds come from the backtests in night/sim/JUDGE.md."""
++import argparse
++import math
++import multiprocessing
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++from arena.backtest import BB, expand, play_round
++
++LATE = {
++    "r041": "clone_astra,clone_red,clone_wbot,clone_kojack,clone_claudebot,clone_lehman,clone_sars",
++    "r045": "clone_anker,clone_pokermon,clone_equity,clone_resonance,clone_lehman,clone_pokebot,clone_sars",
++    "r046": "clone_munchlax,clone_lehman,clone_jumpstreet,clone_fishermen,clone_equity,clone_matcha,clone_pokebot",
++    "r048": "clone_attention,clone_test,clone_kaiserbot,clone_pokebot,clone_matcha,clone_aivey,clone_claudebot",
++    "r049": "clone_equity,clone_smartbger,clone_ailin,clone_munchlax,clone_attention,clone_aivey,clone_resonance",
++    "r052": "clone_astra,clone_fishermen,clone_joca,clone_nd,clone_munchlax,clone_bigroddy,clone_red",
++    "r053": "clone_kojack,clone_anton,clone_fishermen,clone_nd,clone_gamblerlove,clone_pokermon",
++    "r054": "clone_anton,clone_nd,clone_clanker,clone_aivey,clone_attention,clone_supernut",
++    "r031": "clone_sars,clone_pokermon,clone_field,clone_kaiserbot,clone_smartbger,clone_joca",
++}
++FINAL = "clone_attention,clone_marketmakers,clone_resonance,clone_anker,clone_fishermen,clone_equity,clone_kojack"
++MIX = "@0*3,clone_attention,clone_fishermen,clone_kojack,clone_resonance"
++TAGS = ("showdown", "noshow_postflop", "call12", "reraised", "betraised1")
++RATES = (("flop bets called", "F1c", ("F1c", "F1f", "F1r"), 2.0), ("turn bets called", "F2c", ("F2c", "F2f", "F2r"), 3.0),
++         ("river bets called", "F3c", ("F3c", "F3f", "F3r"), 4.0), ("re-raises of our open called", "P3c", ("P3c", "P3f", "P3r"), 3.0))
++
++
++def mean_se(xs):
++    n = len(xs)
++    m = sum(xs) / n
++    return m, (math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1) / n) if n > 1 else float("nan"))
++
++
++def part(r, tag, hands):
++    return 100.0 * r["tag"].get(tag, [0, 0.0])[1] / hands / BB if tag else 100.0 * r["fair"] / BB
++
++
++def pooled(tables, hands, tag=None):
++    """Candidate minus live build over a group of tables, each table weighing the same."""
++    ms, vs = [], []
++    for base, cand in tables:
++        m, se = mean_se([part(c, tag, hands) - part(b, tag, hands) for b, c in zip(base, cand)])
++        ms.append(m)
++        vs.append(se * se)
++    return sum(ms) / len(ms), math.sqrt(sum(vs)) / len(ms)
++
++
++def rate(rounds, yes, keys):
++    tot = sum(r["dec"].get(k, 0) for r in rounds for k in keys)
++    return 100.0 * sum(r["dec"].get(yes, 0) for r in rounds) / tot if tot else float("nan")
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__)
++    ap.add_argument("--cand", required=True)
++    ap.add_argument("--base", required=True, help="the live build, bot_v6l.py")
++    ap.add_argument("--only", default="late,final,self,mix")
++    ap.add_argument("--scale", type=float, default=1.0, help="multiplies the number of rounds of every test")
++    ap.add_argument("--hands", type=int, default=1000)
++    ap.add_argument("--seed", type=int, default=90000)
++    ap.add_argument("--procs", type=int, default=1)
++    a = ap.parse_args()
++    bots = [os.path.abspath(a.base), os.path.abspath(a.cand)]
++    groups = []
++    if "late" in a.only:
++        groups.append(("late", [(k, f, 40) for k, f in LATE.items()]))
++    if "final" in a.only:
++        groups.append(("final", [("final", FINAL, 80)]))
++    if "self" in a.only:
++        # blocks of 50 self-play rounds have disagreed by 13 bb/100, so both home tables are played and the bar is high
++        groups.append(("self", [("live_copies", "@0*7", 50), ("cand_copies", "@1*7", 50)]))
++    if "mix" in a.only:
++        groups.append(("mix", [("mix", MIX, 60)]))
++    jobs, index = [], []
++    seed = a.seed
++    for g, tables in groups:
++        for name, field, rounds in tables:
++            n = max(4, int(round(rounds * a.scale)))
++            f = expand(field, bots)
++            for k, b in enumerate(bots):
++                for r in range(n):
++                    jobs.append((b, f, seed + r, a.hands))
++                    index.append((g, name, k))
++            seed += 1000
++    if a.procs > 1:
++        with multiprocessing.Pool(a.procs) as pool:
++            res = pool.map(play_round, jobs, chunksize=1)
++    else:
++        res = [play_round(j) for j in jobs]
++    got = {}
++    for (g, name, k), r in zip(index, res):
++        got.setdefault(g, {}).setdefault(name, ([], []))[k].append(r)
++    verdict = []
++    for g, _ in groups:
++        tables = list(got[g].values())
++        m, se = pooled(tables, a.hands)
++        n = sum(len(t[0]) for t in tables)
++        lvl = mean_se([part(r, None, a.hands) for t in tables for r in t[0]])[0]
++        print("%-5s %d tables, %d paired rounds: live build %+.1f bb/100; candidate minus live build %+.1f (se %.1f)" % (
++            g, len(tables), n, lvl, m, se))
++        print("      by part: " + "  ".join("%s %+.1f (se %.1f)" % ((t,) + pooled(tables, a.hands, t)) for t in TAGS))
++        if len(tables) > 1:
++            print("      by table: " + "  ".join("%s %+.1f" % (k, pooled([t], a.hands)[0]) for k, t in got[g].items()))
++        floor = {"late": 3.5, "final": 7.0, "self": 7.0, "mix": 7.0}[g]
++        if m < -max(floor, 2 * se):
++            verdict.append("WORSE on %s: %+.1f (se %.1f)" % (g, m, se))
++        elif m > max(floor, 2 * se):
++            verdict.append("better on %s: %+.1f (se %.1f)%s" % (
++                g, m, se, "; self-play has not reproduced a live result" if g == "self"
++                else "; counts only if it does not come from showdown or call12"))
++        if g == "late":
++            base = [r for t in tables for r in t[0]]
++            cand = [r for t in tables for r in t[1]]
++            for label, yes, keys, limit in RATES:
++                x, y = rate(base, yes, keys), rate(cand, yes, keys)
++                flag = "   <-- calls more" if y - x > limit else ""
++                print("      %-28s live build %4.1f%%  candidate %4.1f%%%s" % (label, x, y, flag))
++                if flag:
++                    verdict.append("calls more (%s %.1f%% -> %.1f%%): needs a reason from the real hands" % (label, x, y))
++    print("verdict: " + ("; ".join(verdict) if verdict else "no test separates the candidate from the live build"))
++
++
++if __name__ == "__main__":
++    main()

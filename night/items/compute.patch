@@ -1,0 +1,30 @@
+diff --git a/pokerbot/agent.py b/pokerbot/agent.py
+index 7ddabd5..c9a757d 100644
+--- a/pokerbot/agent.py
++++ b/pokerbot/agent.py
+@@ -71,9 +71,9 @@ def workload():
+ class Agent:
+     BANK = 8.0
+     OVERHEAD = 0.0018
+-    LIMIT = 0.004
+-    REFERENCE = 0.0003
+-    TARGET = 0.002
++    LIMIT = 0.008
++    REFERENCE = 0.0012
++    TARGET = 0.004
+     CALIBRATE = True
+     REPORT = False
+ 
+diff --git a/pokerbot/cards.py b/pokerbot/cards.py
+index 991b834..9d21120 100644
+--- a/pokerbot/cards.py
++++ b/pokerbot/cards.py
+@@ -93,7 +93,7 @@ def _rank_value(key):
+     return TOP5[mask]
+ 
+ 
+-_STOP = perf_counter() + 0.4
++_STOP = perf_counter() + 1.5
+ 
+ 
+ def _warm(r, left, key):
