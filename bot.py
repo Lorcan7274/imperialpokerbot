@@ -868,6 +868,13 @@ class Model:
         return (n >= 2 and self.rfit[p] * 8 >= n * 7 and self.badshow[p] < 3
                 and self.viol[p] <= 3 + 0.01 * self.acts[p])
 
+    def sticky(self, p):
+        opp = fold = 0
+        for tag in ("", ":a", ":s", ":k"):
+            opp += self.opp[(p, "p_vs_bet" + tag)]
+            fold += self.cnt[(p, "p_vs_bet" + tag, "fold")]
+        return opp >= 12 and fold <= 0.25 * opp
+
     def freq(self, player, sit, act, n=2):
         prior = PRIORS[(sit, act)][0 if n <= 2 else 1]
         k = 4.0 if sit == "jam" or sit[1] == "_" else self.strength
@@ -1438,6 +1445,7 @@ class Bot:
         soft = "weak" in roles.values()
         # a starter bot that has raised never folds and bets every street, so the stack goes in on the river
         wait = barrel and st < 3 and s.my_stack > P
+        big = barrel or all(roles.get(v) or self.model.sticky(v) for v in ranges)
         tag = {v: line(v, 1, ctx["agg"], ctx["stuck"], ctx["checked"]) for v in ranges}
 
         def response(sit, chips, x, ref):
@@ -1472,7 +1480,7 @@ class Bot:
             floor = 2 * bb + 5
             sizes = ([2 * bb, floor] if soft else []) + [max(f * P, floor) for f in (0.33, 0.7, 1.1)]
             thin = len(sizes) - 1
-            sizes += [1e9] if barrel else [2.2 * P, 1e9]
+            sizes += [1e9] if barrel else [2.2 * P, 1e9] if big else []
             for k, size in enumerate(sizes):
                 if self._late():
                     break
@@ -1500,7 +1508,7 @@ class Bot:
         best, best_ev = (Action("call"), ev_call) if ev_call > 0 else (Action("fold"), 0.0)
         if can_raise and not wait:
             rr = risk("p_vs_raise")
-            for frac in (0.6, 1.0, 1e9):
+            for frac in (0.6, 1.0, 1e9) if big else (0.6, 1.0):
                 if self._late():
                     break
                 a = c + frac * (P + c)

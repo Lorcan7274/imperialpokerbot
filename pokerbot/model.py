@@ -139,6 +139,13 @@ class Model:
         return (n >= 2 and self.rfit[p] * 8 >= n * 7 and self.badshow[p] < 3
                 and self.viol[p] <= 3 + 0.01 * self.acts[p])
 
+    def sticky(self, p):
+        opp = fold = 0
+        for tag in ("", ":a", ":s", ":k"):
+            opp += self.opp[(p, "p_vs_bet" + tag)]
+            fold += self.cnt[(p, "p_vs_bet" + tag, "fold")]
+        return opp >= 12 and fold <= 0.25 * opp
+
     def freq(self, player, sit, act, n=2):
         prior = PRIORS[(sit, act)][0 if n <= 2 else 1]
         k = 4.0 if sit == "jam" or sit[1] == "_" else self.strength

@@ -16,7 +16,7 @@ KINDS = ["fold", "check", "call", "raise"]
 RAISES = ("raise", "bet", "all_in", "allin")
 STARTERS = "FisherMen,Phil AIvey,Attention Is All In,Joca"
 PARTS = ["convert_state", "classify", "Sample.__init__", "Sample.board", "narrow", "keep_top",
-         "simulate", "sim_equity", "river_equity"]
+         "simulate", "sim_equity", "river_equity", "strong_river_equity"]
 now = time.perf_counter
 cpu = time.process_time
 
@@ -312,8 +312,11 @@ def replay_round(job):
             "hands": meta.get("hands", len(hands)), "starting_stack": first["start_stacks"][me],
             "stacks_reset_each_hand": True, "small_blind": first["sb"], "big_blind": first["bb"],
             "betting": "no_limit", "raise_cap": None}
-    started = call("table start", agent.on_table_start, info)[2] if hasattr(agent, "on_table_start") else 0.0
+    started = 0.0
+    if hasattr(agent, "on_table_start"):
+        started = call("table start", agent.on_table_start, info)[2]
     speed0 = getattr(agent, "speed", None)
+    limit = getattr(agent, "LIMIT", None)
     flags = {s: {"spans": [], "sized": [0, 0]} for s in range(len(teams)) if s != me}
     fit = [0, 0, 0, 0]
     odd = []
@@ -361,9 +364,10 @@ def replay_round(job):
                  "nth": seen[street], "opps": state["folded"].count(False) - 1,
                  "acts": len(state["history"]) - 2, "to_call": state["to_call"],
                  "pot": state["pot"], "cards": "".join(state["hole_cards"] + ["|"] + state["board"]),
-                 "speed": getattr(agent, "speed", None)}
-            if spent:
-                d["parts"] = dict(spent)
+                 "speed": getattr(agent, "speed", None),
+                 "guard": bool(limit) and (a.emulate * used if a.emulate else wall) > limit}
+            for k, (seconds, calls) in spent.items():
+                d["t:" + k], d["n:" + k] = seconds, calls
             if not d["acts"] and ends:
                 d["end_wall"], d["end_cpu"] = ends[-1]
             decisions.append(d)
@@ -431,9 +435,10 @@ def clock_report(ds, ends, a, rounds=1):
               1000 * sum(codec) / max(1, len(codec)), 1000 * codec[-1] if codec else 0.0, a.factor,
               a.factor * (wall + tail + sum(codec)) / rounds))
     on = [d for d in ds if d["same"]]
-    print("   over %g ms after x%g on lines the new bot also takes: %d of %d decisions (wall), %d (cpu)" % (
-        a.budget, a.factor, sum(1000 * a.factor * d["wall"] > a.budget for d in on), len(on),
-        sum(1000 * a.factor * d["cpu"] > a.budget for d in on)))
+    print("   over %g ms after x%g on lines the new bot also takes: %d of %d decisions (wall), %d (cpu); "
+          "decisions that ran past the bot's own time guard on its clock: %d" % (
+              a.budget, a.factor, sum(1000 * a.factor * d["wall"] > a.budget for d in on), len(on),
+              sum(1000 * a.factor * d["cpu"] > a.budget for d in on), sum(d["guard"] for d in ds)))
 
 
 def trouble(errors, ds):
@@ -477,11 +482,15 @@ def actions(ds):
         sum(d["same"] for d in ds), len(ds)))
 
 
+def parts_of(d):
+    return {k[2:]: (d[k], d["n:" + k[2:]]) for k in d if k[:2] == "t:"}
+
+
 def slowest(ds, a):
     total = sum(d["wall"] for d in ds)
     parts = {}
     for d in ds:
-        for k, (seconds, calls) in d.get("parts", {}).items():
+        for k, (seconds, calls) in parts_of(d).items():
             s, c = parts.get(k, (0.0, 0))
             parts[k] = (s + seconds, c + calls)
     if parts:
@@ -493,7 +502,7 @@ def slowest(ds, a):
         a.factor, " | parts in ms" if parts else ""))
     for d in sorted(ds, key=lambda d: -d["cpu"])[:a.top]:
         inner = "  ".join("%s %.2f/%d" % (k, 1000 * s, c) for k, (s, c) in sorted(
-            d.get("parts", {}).items(), key=lambda kv: -kv[1][0])[:5])
+            parts_of(d).items(), key=lambda kv: -kv[1][0])[:5])
         print("   %6.3f (%5.2f) | %6.3f | %s #%-4d %-7s act %d of street, %d opp, %2d acts before, "
               "to call %4d, pot %4d, %s | %s > %s %s%s" % (
                   1000 * d["cpu"], 1000 * a.factor * d["cpu"], 1000 * d["wall"], d["round"], d["hand"],
