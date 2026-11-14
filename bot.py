@@ -908,7 +908,7 @@ class GameState:
 def connects(a, b, br):
     return (a in br and b in br) or (a in br and br.count(a) > 1) or (b in br and br.count(b) > 1)
 
-Event = namedtuple("Event", "player street sit act jam rec fit big frac")
+Event = namedtuple("Event", "player street sit act jam rec fit big frac shove")
 
 EDGES = (0.36, 0.48, 0.58, 0.68, 0.88)
 
@@ -922,7 +922,11 @@ def tell_key(e):
     if e.act != "raise":
         return None
     if e.sit[:8] != "p_no_bet":
-        return (g, "r")
+        # some players raise the pot as a bluff and twice the pot for value, so a raise is read by its size
+        return (g, "r" if e.frac < 0.6 else "s" if e.frac < 1.5 else "t")
+    if e.shove:
+        # a bet of the whole stack is no chosen size: the field's are strong where its small bets are weak
+        return (g, "j" if e.frac < EDGES[1] else "J")
     k = 0
     for edge in EDGES:
         if e.frac >= edge:
@@ -1042,14 +1046,18 @@ def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
             # the field bets far less often on later streets when it is checked to
             if raises == 0 and street > 1:
                 sit += "@2" if street == 2 else "@3"
-        fit = False
+        fit = shove = False
         big = level - prev > 2 * bb
         if r.kind == "raise":
             cap = prev + stack - paid.get(p, 0)
             fit = r.to == min(min(level + last, cap) + pot // 2, cap)
+            shove = r.to >= cap
         jam = street == 0 and r.kind == "raise" and r.to >= 25 * bb
-        frac = r.to / pot if r.kind == "raise" and raises == 0 and street and pot > 0 else 0.0
-        out.append(Event(p, street, sit, r.kind, jam, r, fit, big, frac))
+        frac = 0.0
+        if r.kind == "raise" and street and pot > 0:
+            # a bet as a share of the pot; a raise as its increase over the pot once the bet is called
+            frac = r.to / pot if raises == 0 else (r.to - level) / (pot + level - prev)
+        out.append(Event(p, street, sit, r.kind, jam, r, fit, big, frac, shove))
         if r.kind == "raise":
             if street and raises:
                 firm.add(p)
@@ -1554,8 +1562,10 @@ def strong_river_equity(hole, board):
     return won / tot if tot else 0.5
 
 
-TELL_PRIOR = ({"x": 0.09, "r": 0.72, 0: 0.22, 1: 0.4, 2: 0.22, 3: 0.58, 4: 0.7, 5: 0.7},
-              {"x": 0.14, "r": 0.88, 0: 0.38, 1: 0.55, 2: 0.28, 3: 0.7, 4: 0.82, 5: 0.9})
+TELL_PRIOR = ({"x": 0.09, "r": 0.63, "s": 0.76, "t": 0.84, "j": 0.52, "J": 0.72,
+               0: 0.22, 1: 0.4, 2: 0.22, 3: 0.58, 4: 0.7, 5: 0.7},
+              {"x": 0.14, "r": 0.87, "s": 0.95, "t": 0.88, "j": 0.59, "J": 0.86,
+               0: 0.38, 1: 0.55, 2: 0.28, 3: 0.7, 4: 0.82, 5: 0.9})
 
 
 def topx(name, x):
@@ -1905,6 +1915,31 @@ class Bot:
             return Action("raise", to)
         return Action("check") if s.to_call <= 0 else Action("fold")
 
+    def _width(self, v, events, n):
+        # share of starting hands behind a player's raises and calls before the flop, and whether it shoved
+        freq = self.model.freq
+        x = 1.0
+        jam = None
+        for e in events:
+            if e.player == v and e.act == "raise":
+                x *= freq(v, e.sit, "jam" if e.jam else "raise", n)
+                if e.jam:
+                    jam = jam_kind(e.sit)
+            elif e.player == v and e.act == "call":
+                x *= min(1.0, freq(v, e.sit, "raise", n) + freq(v, e.sit, "call", n))
+        if jam:
+            # shown all-in hands in this field run about twice as wide as the frequency suggests;
+            # the same kind of shove counts in full, the player's other shoves at half weight
+            seen = shown = 0.0
+            for kind in "o34":
+                t = self.model.jamx.get((v, kind))
+                if t:
+                    share = 1.0 if kind == jam else 0.5
+                    seen += share * t[0]
+                    shown += share * t[1]
+            x = (2 * x + 2 * (shown + 0.06)) / (4 + seen)
+        return x, jam
+
     def _preflop(self, s):
         bb = s.big_blind
         n = len(s.players)
@@ -1925,31 +1960,13 @@ class Bot:
 
         if raises and (s.to_call >= 0.3 * s.my_stack or raises[-1].jam or level >= 25 * bb):
             name = class_name(*s.hole)
-            into = [v for v in villains
-                    if any(e.player == v and e.act in ("raise", "call") for e in events)]
+            # a caller yet to answer the raise has only its first bet in the pot and mostly folds;
+            # an earlier raiser may still wake up, which only aces and kings can ignore
+            bets = {r.player: r.to for r in s.history}
+            keep = () if name in ("AA", "KK") else {e.player for e in raises}
+            into = [v for v in villains if bets.get(v, 0) >= level or v in keep]
             if len(into) == 1 and into[0] not in clones:
-                v = into[0]
-                x = 1.0
-                jam = None
-                for e in events:
-                    if e.player == v and e.act == "raise":
-                        x *= freq(v, e.sit, "jam" if e.jam else "raise", n)
-                        if e.jam:
-                            jam = jam_kind(e.sit)
-                    elif e.player == v and e.act == "call":
-                        x *= min(1.0, freq(v, e.sit, "raise", n) + freq(v, e.sit, "call", n))
-                if jam:
-                    # shown all-in hands in this field run about twice as wide as the frequency suggests;
-                    # the same kind of shove counts in full, the player's other shoves at half weight
-                    seen = shown = 0.0
-                    for kind in "o34":
-                        t = self.model.jamx.get((v, kind))
-                        if t:
-                            share = 1.0 if kind == jam else 0.5
-                            seen += share * t[0]
-                            shown += share * t[1]
-                    x = (2 * x + 2 * (shown + 0.06)) / (4 + seen)
-                eq = topx(name, x)
+                eq = topx(name, self._width(into[0], events, n)[0])
                 if name in ("AA", "KK"):
                     eq = max(eq, 0.5)
             else:
@@ -1959,6 +1976,12 @@ class Bot:
                     return Action("fold")
                 roles = self._roles(s, events)
                 ranges = self._ranges(s, events, roles)
+                for v in into:
+                    x, jam = self._width(v, events, n)
+                    if jam and not roles.get(v):
+                        w = list(self._sample.base)
+                        narrow(w, self._sample.pre_order, 0, x, 1, 0.15 * x, 0.13)
+                        ranges[v] = w
                 against = [ranges[v] for v in into] or list(ranges.values())
                 sim = simulate(s.hole, [], self._sample, against, self._trials(len(against), True),
                                self.rng, self.deadline)
@@ -2212,6 +2235,9 @@ class Bot:
                 ev = phi * P + (1 - phi) * (eqc * (P + 2 * b) - b)
                 if eqc < 0.8 and b < s.my_stack:
                     ev -= (1 - phi) * fr * b * 0.5
+                    # a player seen to raise far more bets than the field takes the pot from a hand that cannot stand it
+                    if fr > 0.25 and not barrel:
+                        ev -= min(fr - 0.25, 1 - phi) * clamp((0.8 - eqc) / 0.3, 0.0, 1.0) * eqc * (P + 2 * b)
                 if ev > best_ev + 0.02 * P:
                     best, best_ev = Action("raise", s.my_bet + b), ev
                 if b >= most or (k >= thin and not barrel and (eqc < 0.6 or best.kind == "check")):
@@ -2356,23 +2382,24 @@ class Agent:
         legal = state.get("legal_actions", ())
         bot = self.bot
         try:
-            left = max(1, self.hands - state.get("hand_number", 1) + 1)
-            per_hand = (self.bank - self.spent) / left
+            hand = state.get("hand_number", 1)
+            while hand > self.hands:
+                # more hands than the table announced: the time bank is taken to grow with them
+                self.hands += 1000
+                self.bank += self.BANK
+            per_hand = (self.bank - self.spent) / max(1, self.hands - hand + 1)
             bot.trials = (self.base_trials if per_hand > 0.004 else
                           45 if per_hand > 0.002 else 24 if per_hand > 0.0008 else 0)
-            if bot.trials == 0 and self.spent > 1.1 * self.bank:
-                out = {"action": "check" if "check" in legal else "fold"}
-            else:
-                # out of budget by the bot's own count: play on with the quick rules before folding everything
-                quick = bot.trials == 0
-                bot.trials = bot.trials or 16
-                # a smaller budget must not be spent back by the speed controller
-                bot.scale = min(self.speed, bot.trials / self.base_trials)
-                bot.deadline = (t if quick else t + self.LIMIT) if self.CALIBRATE or quick else None
-                a = bot.decide(convert_state(state))
-                out = {"action": a.kind}
-                if a.kind == "raise":
-                    out["amount"] = int(a.amount)
+            # out of budget by the bot's own count: while the server still asks, it answers with the quick rules
+            quick = bot.trials == 0
+            bot.trials = bot.trials or 16
+            # a smaller budget must not be spent back by the speed controller
+            bot.scale = min(self.speed, bot.trials / self.base_trials)
+            bot.deadline = (t if quick else t + self.LIMIT) if self.CALIBRATE or quick else None
+            a = bot.decide(convert_state(state))
+            out = {"action": a.kind}
+            if a.kind == "raise":
+                out["amount"] = int(a.amount)
         except Exception:
             out = {"action": "check" if "check" in legal else "fold"}
         dt = time.perf_counter() - t

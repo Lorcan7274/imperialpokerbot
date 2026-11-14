@@ -112,23 +112,24 @@ class Agent:
         legal = state.get("legal_actions", ())
         bot = self.bot
         try:
-            left = max(1, self.hands - state.get("hand_number", 1) + 1)
-            per_hand = (self.bank - self.spent) / left
+            hand = state.get("hand_number", 1)
+            while hand > self.hands:
+                # more hands than the table announced: the time bank is taken to grow with them
+                self.hands += 1000
+                self.bank += self.BANK
+            per_hand = (self.bank - self.spent) / max(1, self.hands - hand + 1)
             bot.trials = (self.base_trials if per_hand > 0.004 else
                           45 if per_hand > 0.002 else 24 if per_hand > 0.0008 else 0)
-            if bot.trials == 0 and self.spent > 1.1 * self.bank:
-                out = {"action": "check" if "check" in legal else "fold"}
-            else:
-                # out of budget by the bot's own count: play on with the quick rules before folding everything
-                quick = bot.trials == 0
-                bot.trials = bot.trials or 16
-                # a smaller budget must not be spent back by the speed controller
-                bot.scale = min(self.speed, bot.trials / self.base_trials)
-                bot.deadline = (t if quick else t + self.LIMIT) if self.CALIBRATE or quick else None
-                a = bot.decide(convert_state(state))
-                out = {"action": a.kind}
-                if a.kind == "raise":
-                    out["amount"] = int(a.amount)
+            # out of budget by the bot's own count: while the server still asks, it answers with the quick rules
+            quick = bot.trials == 0
+            bot.trials = bot.trials or 16
+            # a smaller budget must not be spent back by the speed controller
+            bot.scale = min(self.speed, bot.trials / self.base_trials)
+            bot.deadline = (t if quick else t + self.LIMIT) if self.CALIBRATE or quick else None
+            a = bot.decide(convert_state(state))
+            out = {"action": a.kind}
+            if a.kind == "raise":
+                out["amount"] = int(a.amount)
         except Exception:
             out = {"action": "check" if "check" in legal else "fold"}
         dt = time.perf_counter() - t

@@ -280,5 +280,67 @@ class RealEE(SizeTell):
         return Action("call") if frac < 0.4 and self.rng.random() < 0.5 else Action("fold")
 
 
+class RealWBot(SizeTell):
+    """Stand-in for "WBot": bets nearly every time it is checked to and raises two bets in five,
+    the pot as a bluff and twice the pot for value; a small bet on later streets is weak and a big one is not."""
+    open_to = 70
+    open_pct = (0.30, 0.34, 0.40, 0.46)
+    iso_pct = 0.30
+    call_pct = 0.25
+    three_pct = 0.05
+    stack_pct = 0.03
+    fold_to_3bet = 0.51
+
+    def bet_size(self, s, k, live):
+        u = self.rng.random()
+        if u > (0.85 if s.street == 3 else 0.95):
+            return 0
+        v = self.rng.random()
+        if s.street == 1:
+            if k >= 3:
+                f = 0.33 if v < 0.3 else 0.6 if v < 0.55 else 1.0 if v < 0.85 else 2.5
+            else:
+                f = 0.15 if v < 0.25 else 0.33 if v < 0.45 else 0.6 if v < 0.7 else 1.0
+        elif s.street == 2:
+            if k >= 3:
+                f = 0.15 if v < 0.4 else 0.33 if v < 0.5 else 0.6 if v < 0.7 else 1.0 if v < 0.9 else 2.35
+            else:
+                f = 0.15 if v < 0.9 else 0.33
+        elif k >= 5:
+            f = 0.15 if v < 0.45 else 2.3
+        else:
+            f = 0.15 if v < 0.8 or k < 3 else 0.33 if v < 0.9 else 2.0
+        return max(s.big_blind, int(f * s.pot))
+
+    def raise_by(self, s, x):
+        return Action("raise", int(min(s.my_bet + s.to_call + x * (s.pot + s.to_call), s.max_raise_to)))
+
+    def facing(self, s, k, frac, bet_already, can_raise):
+        u = self.rng.random()
+        if bet_already:
+            if k >= 5:
+                return self.shove(s, can_raise)
+            if k >= 3:
+                return self.raise_by(s, 1.0) if u < 0.3 and can_raise else Action("call")
+            if k == 2:
+                return Action("call") if u < 0.55 else Action("fold")
+            if k == 1:
+                return Action("call") if u < 0.5 else self.raise_by(s, 1.0) if u < 0.75 and can_raise else Action("fold")
+            return Action("fold") if u < 0.85 else self.raise_by(s, 1.0) if u < 0.95 and can_raise else Action("call")
+        if s.street == 1:
+            row = {5: (0.9, 2.0, 1.0), 4: (0.55, 2.0, 1.0), 3: (0.55, 2.0, 1.0), 1: (0.6, 2.0, 1.0),
+                   2: (0.3, 1.0, 0.8), 0: (0.3, 1.0, 0.4)}[k]
+        elif s.street == 2:
+            row = {5: (0.65, 1.0, 1.0), 4: (0.35, 1.0, 1.0), 3: (0.35, 1.0, 1.0), 1: (0.5, 1.0, 0.8),
+                   2: (0.1, 1.0, 0.8), 0: (0.2, 1.0, 0.35)}[k]
+        else:
+            row = {5: (0.8, 0.5, 1.0), 4: (0.0, 0.5, 1.0), 3: (0.0, 0.5, 1.0), 1: (0.1, 1.0, 0.1),
+                   2: (0.0, 1.0, 0.6), 0: (0.1, 1.0, 0.1)}[k]
+        if u < row[0] and can_raise:
+            return self.raise_by(s, row[1])
+        return Action("call") if u < row[2] else Action("fold")
+
+
 REAL = {"kit_starter0": KitStarter, "kit_variant": KitVariant, "tight_a": TightIso, "tight_b": TightIsoB,
-        "real_cpcf": RealCPCF, "real_gg": RealGamesGone, "real_ee": RealEE, "real_mohil": RealMohil}
+        "real_cpcf": RealCPCF, "real_gg": RealGamesGone, "real_ee": RealEE, "real_mohil": RealMohil,
+        "real_wbot": RealWBot}

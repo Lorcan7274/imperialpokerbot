@@ -6,7 +6,7 @@ from .preflop import percentile
 def connects(a, b, br):
     return (a in br and b in br) or (a in br and br.count(a) > 1) or (b in br and br.count(b) > 1)
 
-Event = namedtuple("Event", "player street sit act jam rec fit big frac")
+Event = namedtuple("Event", "player street sit act jam rec fit big frac shove")
 
 EDGES = (0.36, 0.48, 0.58, 0.68, 0.88)
 
@@ -20,7 +20,11 @@ def tell_key(e):
     if e.act != "raise":
         return None
     if e.sit[:8] != "p_no_bet":
-        return (g, "r")
+        # some players raise the pot as a bluff and twice the pot for value, so a raise is read by its size
+        return (g, "r" if e.frac < 0.6 else "s" if e.frac < 1.5 else "t")
+    if e.shove:
+        # a bet of the whole stack is no chosen size: the field's are strong where its small bets are weak
+        return (g, "j" if e.frac < EDGES[1] else "J")
     k = 0
     for edge in EDGES:
         if e.frac >= edge:
@@ -140,14 +144,18 @@ def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
             # the field bets far less often on later streets when it is checked to
             if raises == 0 and street > 1:
                 sit += "@2" if street == 2 else "@3"
-        fit = False
+        fit = shove = False
         big = level - prev > 2 * bb
         if r.kind == "raise":
             cap = prev + stack - paid.get(p, 0)
             fit = r.to == min(min(level + last, cap) + pot // 2, cap)
+            shove = r.to >= cap
         jam = street == 0 and r.kind == "raise" and r.to >= 25 * bb
-        frac = r.to / pot if r.kind == "raise" and raises == 0 and street and pot > 0 else 0.0
-        out.append(Event(p, street, sit, r.kind, jam, r, fit, big, frac))
+        frac = 0.0
+        if r.kind == "raise" and street and pot > 0:
+            # a bet as a share of the pot; a raise as its increase over the pot once the bet is called
+            frac = r.to / pot if raises == 0 else (r.to - level) / (pot + level - prev)
+        out.append(Event(p, street, sit, r.kind, jam, r, fit, big, frac, shove))
         if r.kind == "raise":
             if street and raises:
                 firm.add(p)

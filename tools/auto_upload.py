@@ -7,6 +7,7 @@ Run this on your own laptop; your login never leaves it.
     python3 auto_upload.py            # no clone: reads the file from GitHub (public repos only)
 
 It uploads only when the file's contents change, never more than once a minute.
+An upload the site did not take (busy, a server error, a dropped connection) is tried again a minute later.
 """
 import argparse
 import hashlib
@@ -46,6 +47,8 @@ def upload(body, cookie):
             return e.code, json.loads(text)
         except ValueError:
             return e.code, {"error": text.decode("utf-8", "replace")}
+    except (OSError, ValueError) as e:
+        return 0, {"error": str(e)[:300]}
 
 
 def main():
@@ -76,11 +79,17 @@ def main():
                 seen = digest
             else:
                 status, reply = upload(body, cookie)
-                print(time.strftime("%H:%M:%S"), "uploaded", digest, "->", status, json.dumps(reply)[:300])
-                if reply.get("busy"):
-                    time.sleep(5)
-                    continue
-                seen = digest
+                busy = isinstance(reply, dict) and reply.get("busy")
+                if 200 <= status < 300 and not busy:
+                    print(time.strftime("%H:%M:%S"), "uploaded", digest, "->", status, json.dumps(reply)[:300])
+                    seen = digest
+                elif busy or status in (0, 408, 429) or status >= 500:
+                    print(time.strftime("%H:%M:%S"), "NOT uploaded, trying again in a minute:", digest, "->", status,
+                          json.dumps(reply)[:300])
+                else:
+                    print(time.strftime("%H:%M:%S"), "REJECTED, not retrying (check the cookie or the file, then restart):",
+                          digest, "->", status, json.dumps(reply)[:300])
+                    seen = digest
         time.sleep(max(60, a.every))
 
 
