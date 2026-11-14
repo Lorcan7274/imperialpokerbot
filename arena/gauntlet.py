@@ -13,8 +13,8 @@ BB = 20
 KIT7 = ["kit_starter", "kit_starter", "kit_station", "kit_station", "kit_tag", "kit_tag", "kit_random"]
 PRESETS = {
     "robin": list(STRONG),
-    "strong": ["adaptive", "tag", "lag", "trapper", "balanced", "tight_iso_a", "tight_iso_b"],
-    "mixed": ["adaptive", "tag", "tight_iso_a", "kit_starter", "kit_station", "kit_tag", "kit_random"],
+    "strong": ["balanced", "lag", "tag", "trapper", "adaptive", "tight_iso_b", "eqbot"],
+    "mixed": ["balanced", "lag", "adaptive", "kit_starter", "kit_station", "kit_tag", "kit_random"],
     "kit": KIT7,
     "real": ["kit_starter", "kit_starter", "kit_starter", "tight_iso_a", "tight_iso_b"],
 }
