@@ -225,8 +225,9 @@ class Model:
 
     def is_clone(self, p):
         n = self.rtot[p]
-        return (n >= 2 and self.rfit[p] * 8 >= n * 7 and self.badshow[p] < 3
-                and self.viol[p] <= 3 + 0.01 * self.acts[p])
+        # a starter bot that runs slowly times out and folds out of turn on about 2% of its actions
+        return (n >= 2 and self.rfit[p] * 8 >= n * 7 and self.badshow[p] < 4
+                and self.viol[p] <= 3 + 0.04 * self.acts[p])
 
     def sticky(self, p):
         opp = fold = 0

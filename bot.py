@@ -1126,8 +1126,9 @@ class Model:
 
     def is_clone(self, p):
         n = self.rtot[p]
-        return (n >= 2 and self.rfit[p] * 8 >= n * 7 and self.badshow[p] < 3
-                and self.viol[p] <= 3 + 0.01 * self.acts[p])
+        # a starter bot that runs slowly times out and folds out of turn on about 2% of its actions
+        return (n >= 2 and self.rfit[p] * 8 >= n * 7 and self.badshow[p] < 4
+                and self.viol[p] <= 3 + 0.04 * self.acts[p])
 
     def sticky(self, p):
         opp = fold = 0
@@ -1644,7 +1645,9 @@ class Bot:
                 jf = self.model.freq(e.player, e.sit, "jam", n)
                 narrow(w, order, 0, jf, 1, 0.15 * jf)
             elif e.act == "raise":
-                narrow(w, order, 0, f("raise"), 1, 0.04)
+                fr = f("raise")
+                # shown hands put only one re-raise in twelve outside the range its frequency implies
+                narrow(w, order, 0, fr, 1, 0.04 if e.sit[:8] == "unopened" else min(0.04, 0.1 * fr))
             elif e.act == "call":
                 fr = f("raise")
                 narrow(w, order, fr * 0.6, fr + f("call"), 0.35, 0.04)
@@ -1783,10 +1786,13 @@ class Bot:
         bets = {r.player: r.to for r in s.history}
         room = [bets.get(v, 0) + 2 * bb for v in limpers + behind if v in clones]
         to = s.my_bet + s.to_call + 2 * bb
-        if self.KEEP and all(v in clones for v in limpers):
-            to = max(min(room), s.min_raise_to)
-        gain = s.pot + sum(to - x + 6 * bb for x in room if x >= to)
-        if e1 >= 0.36 or ok * gain > (1 - ok) * to:
+        low = max(min(room), s.min_raise_to)
+        pay = lambda x: s.pot + sum(x - y + 6 * bb for y in room if y >= x)
+        # real players attack a small open, so it is used only while those behind are likely to fold
+        if (self.KEEP and low < to and all(v in clones for v in limpers)
+                and ok * pay(low) > (1 - ok) * low):
+            return Action("raise", low)
+        if e1 >= 0.36 or ok * pay(to) > (1 - ok) * to:
             return Action("raise", to)
         return Action("check") if s.to_call <= 0 else Action("fold")
 
@@ -1908,7 +1914,8 @@ class Bot:
                     # a starter bot that limped folds to any re-raise
                     if v != r and v not in limped:
                         ff *= 0.664 if v in clones else 0.94
-                if (p < (0.6 if ff < self.ANY3 else 1.0) and to < 0.4 * (s.my_stack + s.my_bet)
+                # a large open is a stronger range and makes the re-raise too dear to try light
+                if (p < (0.6 if ff < self.ANY3 else 1.0) and level <= 4.5 * bb
                         and ff * s.pot > (1 - ff) * self.LIGHT_RISK * (to - s.my_bet) + 0.1 * s.pot):
                     return Action("raise", to)
             return Action("fold")
