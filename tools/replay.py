@@ -603,7 +603,7 @@ def main():
     ap.add_argument("--starters", default=STARTERS,
                     help="comma list of teams known to run the unmodified starter bot")
     ap.add_argument("--json", default="", help="also write every decision to this file")
-    a = ap.parse_args()
+    a = ap.parse_intermixed_args()
     a.bundle = os.path.abspath(a.bundle)
     paths = a.paths or sorted(p for p in glob.glob(os.path.join(a.dir, "*.json"))
                               if not os.path.basename(p).startswith("_"))

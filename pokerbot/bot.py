@@ -126,7 +126,8 @@ class Bot:
         if e.street == 0:
             order = sample.pre_order
             if e.jam:
-                narrow(w, order, 0, self.model.freq(e.player, "jam", "jam", n), 1, 0.02)
+                jf = self.model.freq(e.player, "jam", "jam", n)
+                narrow(w, order, 0, jf, 1, 0.15 * jf)
             elif e.act == "raise":
                 narrow(w, order, 0, f("raise"), 1, 0.04)
             elif e.act == "call":

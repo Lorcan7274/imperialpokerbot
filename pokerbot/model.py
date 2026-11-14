@@ -78,6 +78,7 @@ def classify(history, bb, stack=2000, ctx=None):
                 last = r.to - level
             level = max(level, r.to)
             agg.add(p)
+            checked.discard(p)
         elif r.kind == "call" and street:
             stuck.add(p)
         elif r.kind == "check":
