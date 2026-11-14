@@ -43,12 +43,12 @@ PRIORS = {
     ("vs_3bet", "raise"): (0.15, 0.07),
     ("p_no_bet", "raise"): (0.30, 0.25),
     ("p_no_bet:a", "raise"): (0.55, 0.55),
-    ("p_vs_bet", "fold"): (0.42, 0.45),
-    ("p_vs_bet", "call"): (0.46, 0.45),
+    ("p_vs_bet", "fold"): (0.42, 0.52),
+    ("p_vs_bet", "call"): (0.46, 0.38),
     ("p_vs_bet", "raise"): (0.12, 0.10),
-    ("p_vs_raise", "fold"): (0.45, 0.40),
-    ("p_vs_raise", "call"): (0.42, 0.45),
-    ("p_vs_raise", "raise"): (0.13, 0.15),
+    ("p_vs_raise", "fold"): (0.45, 0.80),
+    ("p_vs_raise", "call"): (0.42, 0.17),
+    ("p_vs_raise", "raise"): (0.13, 0.03),
     ("jam", "jam"): (0.03, 0.02),
     ("unopened", "jam"): (0.012, 0.012),
     ("vs_raise", "jam"): (0.02, 0.02),
@@ -60,9 +60,13 @@ PRIORS = {
     ("re_raised", "call"): (0.18, 0.18),
     ("re_raised", "raise"): (0.12, 0.12),
 }
-for _sit in ("p_vs_bet", "p_vs_raise"):
-    for _tag, _f, _c, _r in ((":k", 0.55, 0.38, 0.07), (":a", 0.22, 0.60, 0.18), (":s", 0.28, 0.62, 0.10),
-                             (":x", 0.08, 0.62, 0.30), (":b", 0.08, 0.64, 0.28)):
+# starting rates by line are the field's own, measured over the real rounds
+for _sit, _rows in (
+        ("p_vs_bet", ((":k", 0.55, 0.42, 0.03), (":a", 0.30, 0.52, 0.18), (":s", 0.25, 0.62, 0.13),
+                      (":x", 0.15, 0.67, 0.18), (":b", 0.15, 0.60, 0.25))),
+        ("p_vs_raise", ((":k", 0.85, 0.13, 0.02), (":a", 0.50, 0.42, 0.08), (":s", 0.20, 0.72, 0.08),
+                        (":x", 0.15, 0.67, 0.18), (":b", 0.15, 0.60, 0.25)))):
+    for _tag, _f, _c, _r in _rows:
         PRIORS[(_sit + _tag, "fold")] = (_f, _f)
         PRIORS[(_sit + _tag, "call")] = (_c, _c)
         PRIORS[(_sit + _tag, "raise")] = (_r, _r)
