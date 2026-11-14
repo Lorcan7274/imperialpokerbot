@@ -20,6 +20,13 @@ PRIORS = {
     ("p_vs_raise", "call"): (0.42, 0.45),
     ("p_vs_raise", "raise"): (0.13, 0.15),
     ("jam", "jam"): (0.03, 0.02),
+    ("unopened", "jam"): (0.012, 0.012),
+    ("vs_raise", "jam"): (0.02, 0.02),
+    ("vs_3bet", "jam"): (0.08, 0.08),
+    ("re_raised", "jam"): (0.08, 0.08),
+    ("re_raised", "fold"): (0.70, 0.70),
+    ("re_raised", "call"): (0.18, 0.18),
+    ("re_raised", "raise"): (0.12, 0.12),
 }
 for _sit in ("p_vs_bet", "p_vs_raise"):
     for _tag, _f, _c, _r in ((":k", 0.55, 0.38, 0.07), (":a", 0.22, 0.60, 0.18), (":s", 0.28, 0.62, 0.10)):
@@ -62,6 +69,8 @@ def classify(history, bb, stack=2000, ctx=None):
             continue
         if street == 0:
             sit = "unopened" if raises == 0 else "vs_raise" if raises == 1 else "vs_3bet"
+            if raises == 2 and p in agg:
+                sit = "re_raised"
         else:
             sit = ("p_no_bet" if raises == 0 else "p_vs_bet" if raises == 1 else "p_vs_raise") + line(
                 p, raises, agg, stuck, checked)
@@ -119,6 +128,7 @@ class Model:
                 self.opp[(p, "jam")] += 1
                 if e.jam:
                     self.cnt[(p, "jam", "jam")] += 1
+                    self.cnt[(p, e.sit, "jam")] += 1
             if e.act == "raise":
                 self.rtot[p] += 1
                 self.rfit[p] += e.fit
@@ -149,5 +159,5 @@ class Model:
 
     def freq(self, player, sit, act, n=2):
         prior = PRIORS[(sit, act)][0 if n <= 2 else 1]
-        k = 4.0 if sit == "jam" or sit[1] == "_" else self.strength
+        k = 4.0 if sit == "jam" or sit == "re_raised" or sit[1] == "_" else self.strength
         return (self.cnt[(player, sit, act)] + prior * k) / (self.opp[(player, sit)] + k)

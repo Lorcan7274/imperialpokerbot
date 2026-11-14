@@ -43,6 +43,9 @@ def floor_for(f, noise):
 
 
 class Bot:
+    LIGHT3 = True
+    OPEN_BB = 3.5
+
     def __init__(self, seed=None, trials=90, strict=False, samples=160):
         self.rng = random.Random(seed)
         self.trials = trials
@@ -161,7 +164,7 @@ class Bot:
         if e.street == 0:
             order = sample.pre_order
             if e.jam:
-                jf = self.model.freq(e.player, "jam", "jam", n)
+                jf = self.model.freq(e.player, e.sit, "jam", n)
                 narrow(w, order, 0, jf, 1, 0.15 * jf)
             elif e.act == "raise":
                 narrow(w, order, 0, f("raise"), 1, 0.04)
@@ -315,7 +318,7 @@ class Bot:
                 pct *= clamp(1.3 - 1.0 * loose, 0.55, 1.1)
             if limpers:
                 pct *= 0.8
-            size = 2.5 + limpers + 7 * max(0.0, loose - 0.3)
+            size = self.OPEN_BB + limpers + 7 * max(0.0, loose - 0.3)
             if p < pct:
                 return self._raise(s, min(size, 9) * bb)
             if s.to_call <= 0:
@@ -342,6 +345,14 @@ class Bot:
                 return self._raise(s, to)
             if p < (0.24 if s.my_bet >= bb else 0.11) * width * sizeadj:
                 return Action("call")
+            if self.LIGHT3 and p < 0.6 and self.model.opp[(r, "re_raised")] >= 2 and all(
+                    e.act == "fold" or e.player == r for e in events):
+                ff = freq(r, "re_raised", "fold", n)
+                for v in villains:
+                    if v != r:
+                        ff *= 0.664 if v in clones else 0.94
+                if ff * s.pot > (1 - ff) * (to - s.my_bet) + 0.1 * s.pot:
+                    return self._raise(s, to)
             return Action("fold")
 
         if len(raises) == 2:
