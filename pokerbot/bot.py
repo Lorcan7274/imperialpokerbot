@@ -77,6 +77,8 @@ class Bot:
     LIGHT3 = True
     POSW = False
     ANY3 = 0.8
+    LIGHT_OBS = 0
+    LIGHT_RISK = 0.75
     PLAN = True
     MILK = True
     KEEP = True
@@ -469,7 +471,7 @@ class Bot:
             if p < (0.24 if s.my_bet >= bb else 0.11) * width * sizeadj:
                 return Action("call")
             limped = {e.player for e in events if e.act == "call" and e.player in clones}
-            if self.LIGHT3 and self.model.opp[(r, "re_raised")] >= 2 and all(
+            if self.LIGHT3 and self.model.opp[(r, "re_raised")] >= self.LIGHT_OBS and all(
                     e.act == "fold" or e.player == r or e.player in limped for e in events):
                 ff = freq(r, "re_raised", "fold", n)
                 for v in villains:
@@ -477,7 +479,7 @@ class Bot:
                     if v != r and v not in limped:
                         ff *= 0.664 if v in clones else 0.94
                 if (p < (0.6 if ff < self.ANY3 else 1.0) and to < 0.4 * (s.my_stack + s.my_bet)
-                        and ff * s.pot > (1 - ff) * (to - s.my_bet) + 0.1 * s.pot):
+                        and ff * s.pot > (1 - ff) * self.LIGHT_RISK * (to - s.my_bet) + 0.1 * s.pot):
                     return Action("raise", to)
             return Action("fold")
 
