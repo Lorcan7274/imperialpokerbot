@@ -209,10 +209,23 @@ def starter_move(state):
     return "fold", 0
 
 
-def load(path):
+def load(path, clock=None):
     spec = importlib.util.spec_from_file_location("bot", path)
     mod = importlib.util.module_from_spec(spec)
-    exec(spec.loader.source_to_code(spec.loader.get_data(path), path), mod.__dict__)
+    real = time.perf_counter, time.monotonic
+    # a bundle may read the clock while it loads, so the emulated clock is in place for that too
+    if clock:
+        time.perf_counter = time.monotonic = clock
+    try:
+        exec(spec.loader.source_to_code(spec.loader.get_data(path), path), mod.__dict__)
+    finally:
+        time.perf_counter, time.monotonic = real
+    if clock:
+        proxy = type(time)("time")
+        vars(proxy).update(vars(time), perf_counter=clock, monotonic=clock)
+        for name, value in list(vars(mod).items()):
+            if value is time:
+                setattr(mod, name, proxy)
     return mod
 
 
@@ -229,17 +242,6 @@ def trap(path):
     mon.register_callback(mon.DEBUGGER_ID, mon.events.EXCEPTION_HANDLED, handled)
     mon.set_events(mon.DEBUGGER_ID, mon.events.EXCEPTION_HANDLED)
     return caught
-
-
-def skew(mod, factor):
-    fast = lambda: factor * cpu()
-    clock = type(time)("time")
-    vars(clock).update(vars(time), perf_counter=fast, monotonic=fast)
-    for name, value in list(vars(mod).items()):
-        if value is time:
-            setattr(mod, name, clock)
-        elif value is time.perf_counter or value is time.monotonic:
-            setattr(mod, name, fast)
 
 
 def meter(mod):
@@ -276,11 +278,9 @@ def replay_round(job):
     gc.collect()
     gc.freeze()
     c0 = cpu()
-    mod = load(a.bundle)
+    mod = load(a.bundle, (lambda: a.emulate * cpu()) if a.emulate else None)
     loaded = cpu() - c0
     caught = trap(a.bundle)
-    if a.emulate:
-        skew(mod, a.emulate)
     spent = meter(mod) if a.explain else {}
     agent = mod.Agent()
     bot = getattr(agent, "bot", None)
