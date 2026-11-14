@@ -1577,10 +1577,10 @@ def strong_river_equity(hole, board):
     return won / tot if tot else 0.5
 
 
-TELL_PRIOR = ({"x": 0.09, "r": 0.64, "s": 0.75, "t": 0.84, "j": 0.58, "J": 0.72,
-               0: 0.14, 1: 0.37, 2: 0.24, 3: 0.54, 4: 0.68, 5: 0.67},
-              {"x": 0.15, "r": 0.86, "s": 0.95, "t": 0.88, "j": 0.65, "J": 0.83,
-               0: 0.19, 1: 0.51, 2: 0.27, 3: 0.62, 4: 0.84, 5: 0.90})
+TELL_PRIOR = ({"x": 0.09, "r": 0.63, "s": 0.76, "t": 0.84, "j": 0.52, "J": 0.72,
+               0: 0.22, 1: 0.4, 2: 0.22, 3: 0.58, 4: 0.7, 5: 0.7},
+              {"x": 0.14, "r": 0.87, "s": 0.95, "t": 0.88, "j": 0.59, "J": 0.86,
+               0: 0.38, 1: 0.55, 2: 0.28, 3: 0.7, 4: 0.82, 5: 0.9})
 
 
 def topx(name, x):
@@ -1623,8 +1623,7 @@ class Bot:
     KEEP = True
     OPEN_BB = 3.5
     TELLS = True
-    ONEPAIR = ({0: 0.8, 1: 0.8, 2: 0.8, 3: 0.8, 4: 0.55, 5: 0.55, "j": 0.5, "J": 0.5},
-               {0: 0.55, 1: 0.55, 2: 0.55, 3: 0.5, 4: 0.38, 5: 0.3, "j": 0.45, "J": 0.35})
+    ONEPAIR = (0.5, 0.4)
 
     def __init__(self, seed=None, trials=90, strict=False, samples=160):
         self.rng = random.Random(seed)
@@ -1783,11 +1782,9 @@ class Bot:
             return
         _, order = sample.board(s.board[:BOARD_LEN[e.street]])
         noise = NOISE[e.street]
-        base = None
         if e.sit[:8] == "p_no_bet":
             fr = f("raise")
             if e.act == "raise":
-                base = list(w)
                 narrow(w, order, 0, fr, 1, floor_for(fr, noise))
             elif e.act == "check":
                 narrow(w, order, fr, 1, 0.35, 1)
@@ -1816,18 +1813,8 @@ class Bot:
                 up, down = q / share, (1 - q) / (1 - share)
                 for i, k in enumerate(flags):
                     w[i] *= up if k else down
-                if base is not None and self.ONEPAIR:
-                    # shown bets short of top pair are air as often as small pairs, so that part keeps the mix
-                    # it had before the bet; and the good hands are one pair about as often as the showdowns say
-                    was = now = 0.0
-                    for x, y, k in zip(base, w, flags):
-                        if not k:
-                            was += x
-                            now += y
-                    if was > 0.0:
-                        for i, k in enumerate(flags):
-                            if not k:
-                                w[i] = base[i] * now / was
+                if self.ONEPAIR and key[1] in ("j", "J"):
+                    # shown shoves hold one good pair about as often as anything better
                     bigs = sample.bigs(s.board[:BOARD_LEN[e.street]])
                     one = more = 0.0
                     for x, k, b in zip(w, flags, bigs):
@@ -1836,7 +1823,7 @@ class Bot:
                                 more += x
                             else:
                                 one += x
-                    goal = self.ONEPAIR[key[0]].get(key[1], 0.0) * (one + more)
+                    goal = self.ONEPAIR[key[0]] * (one + more)
                     if 0.0 < one < goal and more > 0.0:
                         lift, cut = goal / one, (one + more - goal) / more
                         for i, k in enumerate(flags):
