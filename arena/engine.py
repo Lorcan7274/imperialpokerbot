@@ -2,7 +2,7 @@ import random
 from itertools import combinations, cycle
 
 from pokerbot.cards import evaluate
-from pokerbot.state import Action, GameState, Rec
+from pokerbot.state import GameState, Rec
 
 
 BOARD_AT = {0: 0, 1: 3, 2: 4, 3: 5}
