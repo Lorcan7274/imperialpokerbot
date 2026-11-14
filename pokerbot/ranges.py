@@ -240,3 +240,51 @@ def river_equity(hv, vals, ranges, mults=None):
                     won += x * 0.5
         eq *= won / tot if tot > 0 else 0.5
     return eq
+
+
+def runout_equity(hero, board, runs, sample, w, deadline=None):
+    hero = list(hero)
+    board = list(board)
+    rows = [(x, sample.mask[i], sample.rank[i], sample.suit[i], sample.combos[i])
+            for i, x in enumerate(w) if x]
+    rk0 = 0
+    sk0 = 0x3333
+    for c in board:
+        rk0 += RANK_KEY[c]
+        sk0 += SUIT_KEY[c]
+    hrk = RANK_KEY[hero[0]] + RANK_KEY[hero[1]]
+    hsk = SUIT_KEY[hero[0]] + SUIT_KEY[hero[1]]
+    get = _CACHE.get
+    out = []
+    for run in runs:
+        if deadline and perf_counter() > deadline:
+            break
+        rk, sk, dead = rk0, sk0, 0
+        for c in run:
+            rk += RANK_KEY[c]
+            sk += SUIT_KEY[c]
+            dead |= 1 << c
+        full = board + run
+        if (sk + hsk) & 0x8888:
+            hv = evaluate(hero + full)
+        else:
+            hv = get(rk + hrk)
+            if hv is None:
+                hv = _CACHE[rk + hrk] = _rank_value(rk + hrk)
+        won = tot = 0.0
+        for x, m, r, u, xy in rows:
+            if m & dead:
+                continue
+            if (sk + u) & 0x8888:
+                v = evaluate(list(xy) + full)
+            else:
+                v = get(rk + r)
+                if v is None:
+                    v = _CACHE[rk + r] = _rank_value(rk + r)
+            tot += x
+            if hv > v:
+                won += x
+            elif hv == v:
+                won += 0.5 * x
+        out.append(won / tot if tot else 0.5)
+    return out

@@ -1,5 +1,7 @@
 from collections import defaultdict, namedtuple
 
+from .preflop import percentile
+
 Event = namedtuple("Event", "player street sit act jam rec fit big frac")
 
 EDGES = (0.36, 0.48, 0.58, 0.68, 0.88)
@@ -22,8 +24,17 @@ def tell_key(e):
     return (g, k)
 
 PRIORS = {
-    ("unopened", "raise"): (0.45, 0.18),
-    ("unopened", "call"): (0.15, 0.10),
+    ("unopened", "raise"): (0.45, 0.17),
+    ("unopened", "call"): (0.15, 0.05),
+    ("unopened:l", "raise"): (0.45, 0.33),
+    ("unopened:l", "call"): (0.15, 0.06),
+    ("unopened:b", "raise"): (0.45, 0.42),
+    ("unopened:b", "call"): (0.15, 0.12),
+    ("unopened:o", "raise"): (0.30, 0.28),
+    ("unopened:o", "call"): (0.01, 0.01),
+    ("unopened:l", "jam"): (0.012, 0.012),
+    ("unopened:b", "jam"): (0.012, 0.012),
+    ("unopened:o", "jam"): (0.012, 0.012),
     ("vs_raise", "fold"): (0.50, 0.75),
     ("vs_raise", "call"): (0.38, 0.18),
     ("vs_raise", "raise"): (0.12, 0.07),
@@ -43,6 +54,7 @@ PRIORS = {
     ("vs_raise", "jam"): (0.02, 0.02),
     ("vs_3bet", "jam"): (0.08, 0.08),
     ("re_raised", "jam"): (0.08, 0.08),
+    ("vs_hero", "raise"): (0.12, 0.06),
     ("re_raised", "fold"): (0.70, 0.70),
     ("re_raised", "call"): (0.18, 0.18),
     ("re_raised", "raise"): (0.12, 0.12),
@@ -63,7 +75,7 @@ def line(p, raises, agg, stuck, checked, firm=()):
     return ":k" if p in checked else ":a" if p in agg else ":s" if p in stuck else ""
 
 
-def classify(history, bb, stack=2000, ctx=None):
+def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
     out = []
     agg, stuck, checked, firm = set(), set(), set(), set()
     street = None
@@ -71,6 +83,7 @@ def classify(history, bb, stack=2000, ctx=None):
     raises = 0
     last = bb
     pot = 0
+    acted = 0
     bets = {}
     paid = {}
     for r in history:
@@ -79,8 +92,9 @@ def classify(history, bb, stack=2000, ctx=None):
             level = 0
             raises = 0
             last = bb
+            # whoever checked the last street through is still read as having checked when bet into
+            checked = {q for q in checked if not bets.get(q)}
             bets = {}
-            checked = set()
         p = r.player
         prev = bets.get(p, 0)
         if r.kind in ("sb", "bb"):
@@ -90,9 +104,13 @@ def classify(history, bb, stack=2000, ctx=None):
             level = max(level, r.to)
             continue
         if street == 0:
-            sit = "unopened" if raises == 0 else "vs_raise" if raises == 1 else "vs_3bet"
-            if raises == 2 and p in agg:
-                sit = "re_raised"
+            if raises == 0:
+                # seats still to act behind: the blinds are last, and earlier seats open tighter
+                left = n - 1 - acted if n else 9
+                sit = "unopened" + (":o" if left <= 0 else ":b" if left == 1 else ":l" if left <= 3 else "")
+                acted += 1
+            else:
+                sit = "re_raised" if raises == 2 and p in agg else "vs_raise" if raises == 1 else "vs_3bet"
         else:
             sit = ("p_no_bet" if raises == 0 else "p_vs_bet" if raises == 1 else "p_vs_raise") + line(
                 p, raises, agg, stuck, checked, firm)
@@ -125,6 +143,8 @@ def classify(history, bb, stack=2000, ctx=None):
             paid[p] = paid.get(p, 0) + r.to - prev
             pot += r.to - prev
     if ctx is not None:
+        if now is not None and now != street:
+            checked = {q for q in checked if not bets.get(q)}
         ctx.update(agg=agg, stuck=stuck, checked=checked, firm=firm)
     return out
 
@@ -141,23 +161,41 @@ class Model:
         self.viol = defaultdict(int)
         self.badshow = defaultdict(int)
         self.tell = {}
+        self.jamx = {}
 
     def observe(self, events, hero, shown=None):
         seen = set()
         hot = set()
+        jams = set()
+        last = None
+        raises = 0
         for e in events:
             p = e.player
+            facing = last
+            if e.street == 0 and e.act == "raise":
+                last = p
+                raises += 1
             if p == hero:
                 continue
+            # a player who re-raises our opens in particular is read apart from how it treats the table
+            if e.sit == "vs_raise" and facing == hero:
+                self.opp[(p, "vs_hero")] += 1
+                if e.act == "raise":
+                    self.cnt[(p, "vs_hero", "raise")] += 1
             seen.add(p)
             self.acts[p] += 1
-            self.opp[(p, e.sit)] += 1
-            self.cnt[(p, e.sit, e.act)] += 1
+            if e.jam:
+                jams.add(p)
+            # how an opener answers a starter bot's re-raise says little about how it answers ours
+            if e.sit != "re_raised" or facing is None or not self.is_clone(facing):
+                self.opp[(p, e.sit)] += 1
+                self.cnt[(p, e.sit, e.act)] += 1
+                if e.jam:
+                    self.cnt[(p, e.sit, "jam")] += 1
             if e.street == 0:
                 self.opp[(p, "jam")] += 1
                 if e.jam:
                     self.cnt[(p, "jam", "jam")] += 1
-                    self.cnt[(p, e.sit, "jam")] += 1
             if e.act == "raise":
                 self.rtot[p] += 1
                 self.rfit[p] += e.fit
@@ -173,6 +211,10 @@ class Model:
                 a, b = cards[0] >> 2, cards[1] >> 2
                 if (a == b or a >= 11 or b >= 11) != (p in hot):
                     self.badshow[p] += 1
+                if p in jams:
+                    t = self.jamx.setdefault(p, [0, 0.0])
+                    t[0] += 1
+                    t[1] += percentile(*cards)
 
     def is_clone(self, p):
         n = self.rtot[p]
@@ -185,6 +227,13 @@ class Model:
             opp += self.opp[(p, "p_vs_bet" + tag)]
             fold += self.cnt[(p, "p_vs_bet" + tag, "fold")]
         return opp >= 12 and fold <= 0.25 * opp
+
+    def opens(self, player, n=2):
+        opp = cnt = 0
+        for tag in ("", ":l", ":b", ":o"):
+            opp += self.opp[(player, "unopened" + tag)]
+            cnt += self.cnt[(player, "unopened" + tag, "raise")]
+        return (cnt + (0.45 if n <= 2 else 0.18) * self.strength) / (opp + self.strength)
 
     def freq(self, player, sit, act, n=2):
         prior = PRIORS[(sit, act)][0 if n <= 2 else 1]

@@ -204,6 +204,32 @@ class RealGamesGone(SizeTell):
         return Action("call") if self.rng.random() < (0.75 if frac < 0.4 else 0.4) else Action("fold")
 
 
+class RealMohil(RealGamesGone):
+    """Stand-in for "Mohil'sPokerBot": re-raises most opens with any two cards and rarely gives up afterwards."""
+    open_pct = (0.2, 0.22, 0.28, 0.35)
+
+    def preflop(self, s):
+        p = percentile(*s.hole)
+        can_raise = s.max_raise_to > s.my_bet + s.to_call
+        pre = [r for r in s.history if r.street == 0 and r.kind in ("raise", "call")]
+        raises = [r for r in pre if r.kind == "raise"]
+        if not raises:
+            return super().preflop(s)
+        level = s.my_bet + s.to_call
+        mine = any(r.player == s.hero for r in raises)
+        if len(raises) == 1 and not mine:
+            if can_raise and self.rng.random() < 0.78:
+                if p < 0.17 and self.rng.random() < 0.35:
+                    return Action("raise", s.max_raise_to)
+                return Action("raise", min(3 * level, s.max_raise_to))
+            return Action("call") if p < 0.15 else self.give_up(s)
+        if s.to_call >= 0.5 * s.my_stack:
+            return Action("call") if p < 0.2 else self.give_up(s)
+        if p < 0.11:
+            return Action("raise", s.max_raise_to) if can_raise else Action("call")
+        return Action("call") if p < 0.45 else self.give_up(s)
+
+
 class RealEE(SizeTell):
     """Stand-in for "Equity Engine": 0.8 pot with top pair or better, half pot weak, and a check is never strong."""
     open_to = 70
@@ -235,4 +261,4 @@ class RealEE(SizeTell):
 
 
 REAL = {"kit_starter0": KitStarter, "tight_a": TightIso, "tight_b": TightIsoB,
-        "real_cpcf": RealCPCF, "real_gg": RealGamesGone, "real_ee": RealEE}
+        "real_cpcf": RealCPCF, "real_gg": RealGamesGone, "real_ee": RealEE, "real_mohil": RealMohil}

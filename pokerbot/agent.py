@@ -91,6 +91,7 @@ class Agent:
     def on_table_start(self, info):
         self.hands = info.get("hands", 1000)
         self.bank = self.BANK * max(1.0, self.hands / 1000.0)
+        self.bot.seats = info.get("num_players") or 0
         if not self.CALIBRATE:
             return
         try:
@@ -115,11 +116,15 @@ class Agent:
             per_hand = (self.bank - self.spent) / left
             bot.trials = (self.base_trials if per_hand > 0.004 else
                           45 if per_hand > 0.002 else 24 if per_hand > 0.0008 else 0)
-            if bot.trials == 0:
+            if bot.trials == 0 and self.spent > 1.1 * self.bank:
                 out = {"action": "check" if "check" in legal else "fold"}
             else:
-                bot.scale = self.speed
-                bot.deadline = t + self.LIMIT if self.CALIBRATE else None
+                # out of budget by the bot's own count: play on with the quick rules before folding everything
+                quick = bot.trials == 0
+                bot.trials = bot.trials or 16
+                # a smaller budget must not be spent back by the speed controller
+                bot.scale = min(self.speed, bot.trials / self.base_trials)
+                bot.deadline = (t if quick else t + self.LIMIT) if self.CALIBRATE or quick else None
                 a = bot.decide(convert_state(state))
                 out = {"action": a.kind}
                 if a.kind == "raise":
@@ -129,7 +134,8 @@ class Agent:
         dt = time.perf_counter() - t
         self.spent += dt + self.OVERHEAD
         post = bool(state.get("board"))
-        if self.CALIBRATE and post:
+        # decisions that ran no simulation say nothing about how long one takes here
+        if self.CALIBRATE and post and dt > 0.2 * self.TARGET:
             self.heavy += 0.15 * (min(dt, 3 * self.heavy) - self.heavy)
             if self.heavy > 1.5 * self.TARGET:
                 self.speed = max(0.15, self.speed * 0.9)
