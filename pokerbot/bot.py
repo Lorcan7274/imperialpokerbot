@@ -497,7 +497,7 @@ class Bot:
                 for v in villains:
                     # a starter bot that limped folds to any re-raise
                     if v != r and v not in limped:
-                        ff *= 0.664 if v in clones else 0.94
+                        ff *= 0.664 if v in clones else freq(v, "cold3", "fold", n)
                 # in real rounds these paid only from the big blind or against an opener seen folding 85% or more,
                 # and never against a large open, which is a stronger range
                 if (p < (0.6 if ff < self.ANY3 else 1.0) and level <= 4.5 * bb

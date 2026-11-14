@@ -957,6 +957,7 @@ PRIORS = {
     ("vs_3bet", "jam"): (0.08, 0.06),
     ("re_raised", "jam"): (0.08, 0.08),
     ("vs_hero", "raise"): (0.12, 0.06),
+    ("cold3", "fold"): (0.90, 0.93),
     ("re_raised", "fold"): (0.70, 0.70),
     ("re_raised", "call"): (0.18, 0.18),
     ("re_raised", "raise"): (0.12, 0.12),
@@ -1078,14 +1079,23 @@ class Model:
         jams = set()
         last = None
         raises = 0
+        acted = set()
         for e in events:
             p = e.player
             facing = last
+            before = raises
+            fresh = p not in acted
+            acted.add(p)
             if e.street == 0 and e.act == "raise":
                 last = p
                 raises += 1
             if p == hero:
                 continue
+            # some players call a re-raise cold far more often than the field does
+            if e.street == 0 and before == 2 and fresh:
+                self.opp[(p, "cold3")] += 1
+                if e.act == "fold":
+                    self.cnt[(p, "cold3", "fold")] += 1
             # a player who re-raises our opens in particular is read apart from how it treats the table
             if e.sit == "vs_raise" and facing == hero:
                 self.opp[(p, "vs_hero")] += 1
@@ -1946,7 +1956,7 @@ class Bot:
                 for v in villains:
                     # a starter bot that limped folds to any re-raise
                     if v != r and v not in limped:
-                        ff *= 0.664 if v in clones else 0.94
+                        ff *= 0.664 if v in clones else freq(v, "cold3", "fold", n)
                 # in real rounds these paid only from the big blind or against an opener seen folding 85% or more,
                 # and never against a large open, which is a stronger range
                 if (p < (0.6 if ff < self.ANY3 else 1.0) and level <= 4.5 * bb
