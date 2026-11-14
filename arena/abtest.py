@@ -17,7 +17,8 @@ _MODULES = {}
 
 def registry():
     reg = dict(ALL, house=House)
-    for mod, attr in (("arena.rivals", "RIVALS"), ("arena.exploiters", "EXPLOITERS")):
+    for mod, attr in (("arena.realfield", "REAL"), ("arena.rivals", "RIVALS"),
+                      ("arena.exploiters", "EXPLOITERS")):
         try:
             reg.update(getattr(importlib.import_module(mod), attr))
         except Exception:
@@ -43,6 +44,7 @@ def make_agent(path, seed, paced):
         bot.strict = True
     if not paced and hasattr(agent, "BANK"):
         agent.BANK = 1e9
+        agent.CALIBRATE = False
     return agent
 
 

@@ -120,7 +120,7 @@ def analyse(path, verbose):
         if me is not None:
             mine.append((res.get(me, 0), h))
     print("== %s  %s  hands=%d  me=seat %s" % (os.path.basename(path), {k: v for k, v in rd.items() if k != "ref"}, len(hands), me))
-    names = data.get("seats") or data.get("teams") or rd.get("seats") or {}
+    names = data.get("players") or data.get("seats") or data.get("teams") or {}
     print("seat team             bb/100  VPIP  PFR  3bet fold>open limp  jam | bet  fold>bet raise>bet call>bet | SD  top open sizes")
     for seat in sorted(seats):
         s = seats[seat]
