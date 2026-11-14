@@ -1246,6 +1246,12 @@ class Adaptive(ChartBot):
         c = self.stats.c
         return any(c.get((p, "fj_c"), 0) >= 2 for p in s.active if p != s.hero)
 
+    def soft(self, p):
+        c = self.stats.c
+        n = sum(c.get((p, "vb", st, True), 0) for st in (1, 2, 3))
+        f = sum(c.get((p, "vb_f", st, True), 0) for st in (1, 2, 3))
+        return n >= 8 and f < 0.2 * n and self.stats.rate((p, "pfr"), (p, "hands"), 0.18, 12.0) >= 0.25
+
     def unopened(self, s, v, key):
         if self.pays_off(s) and self.jam_ev(s, v) > 10 * v.bb:
             return self.jam(s)
@@ -1266,7 +1272,7 @@ class Adaptive(ChartBot):
             n += 1
         x = PCT[key]
         if a.kind != "raise":
-            if pf > 0.5 and x < 2.4 * (pf - 0.42):
+            if pf > 0.45 and x < 3.0 * (pf - 0.35):
                 return self.rto(s, (3.0 + v.limpers) * v.bb)
             return a
         if x < 0.1 and n and stick / n > 0.45:
@@ -1283,6 +1289,8 @@ class Adaptive(ChartBot):
         std = ChartBot.pre_band(self, s, v, opener)[1]
         w = self.pre_band(s, v, opener)[1]
         x = PCT[key]
+        if a.kind == "fold" and x < 0.7 and s.to_call <= 0.08 * s.my_stack and self.soft(opener):
+            return Action("call")
         if w > 1.35 * std:
             if x < 0.3 * w:
                 return self.rto(s, level * 3.5 + v.callers * level + v.limpers * v.bb)
@@ -1307,6 +1315,8 @@ class Adaptive(ChartBot):
         if eq >= 0.56:
             return self.rto(s, 2.3 * level)
         if eq >= 0.45 and s.to_call <= 0.2 * s.my_stack:
+            return Action("call")
+        if PCT[key] < 0.7 and s.to_call <= 0.1 * s.my_stack and self.soft(raiser):
             return Action("call")
         return Action("fold")
 
