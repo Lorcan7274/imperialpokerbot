@@ -41,8 +41,12 @@ PRIORS = {
     ("vs_3bet", "fold"): (0.55, 0.83),
     ("vs_3bet", "call"): (0.30, 0.10),
     ("vs_3bet", "raise"): (0.15, 0.07),
-    ("p_no_bet", "raise"): (0.30, 0.25),
-    ("p_no_bet:a", "raise"): (0.55, 0.55),
+    ("p_no_bet", "raise"): (0.30, 0.39),
+    ("p_no_bet:a", "raise"): (0.55, 0.65),
+    ("p_no_bet@2", "raise"): (0.25, 0.25),
+    ("p_no_bet:a@2", "raise"): (0.55, 0.59),
+    ("p_no_bet@3", "raise"): (0.20, 0.16),
+    ("p_no_bet:a@3", "raise"): (0.50, 0.48),
     ("p_vs_bet", "fold"): (0.42, 0.52),
     ("p_vs_bet", "call"): (0.46, 0.38),
     ("p_vs_bet", "raise"): (0.12, 0.10),
@@ -124,6 +128,9 @@ def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
         else:
             sit = ("p_no_bet" if raises == 0 else "p_vs_bet" if raises == 1 else "p_vs_raise") + line(
                 p, raises, agg, stuck, checked, firm, bold)
+            # the field bets far less often on later streets when it is checked to
+            if raises == 0 and street > 1:
+                sit += "@2" if street == 2 else "@3"
         fit = False
         big = level - prev > 2 * bb
         if r.kind == "raise":

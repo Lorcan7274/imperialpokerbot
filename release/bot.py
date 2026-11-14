@@ -943,8 +943,12 @@ PRIORS = {
     ("vs_3bet", "fold"): (0.55, 0.83),
     ("vs_3bet", "call"): (0.30, 0.10),
     ("vs_3bet", "raise"): (0.15, 0.07),
-    ("p_no_bet", "raise"): (0.30, 0.25),
-    ("p_no_bet:a", "raise"): (0.55, 0.55),
+    ("p_no_bet", "raise"): (0.30, 0.39),
+    ("p_no_bet:a", "raise"): (0.55, 0.65),
+    ("p_no_bet@2", "raise"): (0.25, 0.25),
+    ("p_no_bet:a@2", "raise"): (0.55, 0.59),
+    ("p_no_bet@3", "raise"): (0.20, 0.16),
+    ("p_no_bet:a@3", "raise"): (0.50, 0.48),
     ("p_vs_bet", "fold"): (0.42, 0.52),
     ("p_vs_bet", "call"): (0.46, 0.38),
     ("p_vs_bet", "raise"): (0.12, 0.10),
@@ -1026,6 +1030,9 @@ def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
         else:
             sit = ("p_no_bet" if raises == 0 else "p_vs_bet" if raises == 1 else "p_vs_raise") + line(
                 p, raises, agg, stuck, checked, firm, bold)
+            # the field bets far less often on later streets when it is checked to
+            if raises == 0 and street > 1:
+                sit += "@2" if street == 2 else "@3"
         fit = False
         big = level - prev > 2 * bb
         if r.kind == "raise":
@@ -1503,8 +1510,8 @@ def strong_river_equity(hole, board):
     return won / tot if tot else 0.5
 
 
-TELL_PRIOR = ({"x": 0.10, "r": 0.75, 0: 0.15, 1: 0.35, 2: 0.2, 3: 0.55, 4: 0.7, 5: 0.7},
-              {"x": 0.12, "r": 0.8, 0: 0.3, 1: 0.45, 2: 0.25, 3: 0.75, 4: 0.8, 5: 0.9})
+TELL_PRIOR = ({"x": 0.09, "r": 0.72, 0: 0.22, 1: 0.4, 2: 0.22, 3: 0.58, 4: 0.7, 5: 0.7},
+              {"x": 0.14, "r": 0.88, 0: 0.38, 1: 0.55, 2: 0.28, 3: 0.7, 4: 0.82, 5: 0.9})
 
 
 def topx(name, x):
