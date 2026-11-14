@@ -11,6 +11,14 @@ Event = namedtuple("Event", "player street sit act jam rec fit big frac shove")
 EDGES = (0.36, 0.48, 0.58, 0.68, 0.88)
 
 
+def size_bucket(frac):
+    k = 0
+    for edge in EDGES:
+        if frac >= edge:
+            k += 1
+    return k
+
+
 def tell_key(e):
     if e.street == 0:
         return None
@@ -25,11 +33,7 @@ def tell_key(e):
     if e.shove:
         # a bet of the whole stack is no chosen size: the field's are strong where its small bets are weak
         return (g, "j" if e.frac < EDGES[1] else "J")
-    k = 0
-    for edge in EDGES:
-        if e.frac >= edge:
-            k += 1
-    return (g, k)
+    return (g, size_bucket(e.frac))
 
 PRIORS = {
     ("unopened", "raise"): (0.45, 0.19),

@@ -3,7 +3,7 @@ from time import perf_counter
 
 from .cards import evaluate
 from .clone_table import CLONE1, CLONE2
-from .model import Model, classify, jam_kind, line, tell_key
+from .model import Model, classify, jam_kind, line, size_bucket, tell_key
 from .preflop import class_name, percentile
 from .ranges import Exact, Sample, connects, keep_top, made, narrow, river_equity, sim_equity, simulate
 from .ranges import runout_equity, strong_hand
@@ -103,6 +103,7 @@ class Bot:
     KEEP = True
     OPEN_BB = 3.5
     TELLS = True
+    ONEPAIR = (0.5, 0.4)
 
     def __init__(self, seed=None, trials=90, strict=False, samples=160):
         self.rng = random.Random(seed)
@@ -244,7 +245,7 @@ class Bot:
         slow = max(0.001, self.model.viol[v] / max(1, self.model.acts[v]))
         return hit + late, [1.0] * len(hit) + [12.6 * slow * len(hit) / max(1, len(late))] * len(late)
 
-    def _update(self, w, e, s, n, sample):
+    def _update(self, w, e, s, n, sample, fired=False):
         f = lambda act: self.model.freq(e.player, e.sit, act, n)
         if e.street == 0:
             order = sample.pre_order
@@ -274,7 +275,12 @@ class Bot:
             narrow(w, order, f("raise"), 1 - f("fold"), 0.5, 0.05)
         key = tell_key(e)
         if key and self.TELLS:
-            t = self.model.tell.get((e.player,) + key, (0, 0))
+            seen, strong = self.model.tell.get((e.player,) + key, (0, 0))
+            if key[1] in ("j", "J") and not fired:
+                # a player who has only bet so far may just be betting its usual size with what it has left
+                more = self.model.tell.get((e.player, key[0], size_bucket(e.frac)), (0, 0))
+                seen += more[0]
+                strong += more[1]
             flags = sample.flags(s.board[:BOARD_LEN[e.street]])
             tot = hit = 0.0
             for x, k in zip(w, flags):
@@ -283,10 +289,26 @@ class Bot:
                     hit += x
             if 0.0 < hit < tot:
                 share = hit / tot
-                q = clamp((t[1] + 2 * TELL_PRIOR[key[0]][key[1]]) / (t[0] + 2), 0.02, 0.98)
+                q = clamp((strong + 2 * TELL_PRIOR[key[0]][key[1]]) / (seen + 2), 0.02, 0.98)
                 up, down = q / share, (1 - q) / (1 - share)
                 for i, k in enumerate(flags):
                     w[i] *= up if k else down
+                if self.ONEPAIR and key[1] in ("j", "J"):
+                    # shown shoves hold one good pair about as often as anything better
+                    bigs = sample.bigs(s.board[:BOARD_LEN[e.street]])
+                    one = more = 0.0
+                    for x, k, b in zip(w, flags, bigs):
+                        if k:
+                            if b:
+                                more += x
+                            else:
+                                one += x
+                    goal = self.ONEPAIR[key[0]] * (one + more)
+                    if 0.0 < one < goal and more > 0.0:
+                        lift, cut = goal / one, (one + more - goal) / more
+                        for i, k in enumerate(flags):
+                            if k:
+                                w[i] *= cut if bigs[i] else lift
 
     def _ranges(self, s, events, roles):
         if self._sample is None:
@@ -319,8 +341,10 @@ class Bot:
                 if len(mine) > MAX_EVENTS:
                     mine = mine[:3] + mine[3 - MAX_EVENTS:]
                 if not self._late():
+                    fired = False
                     for e in mine:
-                        self._update(w, e, s, n, sample)
+                        self._update(w, e, s, n, sample, fired)
+                        fired = fired or (e.street > 0 and e.act == "raise" and e.sit[:8] != "p_no_bet")
             if vals:
                 w = [0.0 if vals[i] < 0 else x for i, x in enumerate(w)]
             out[v] = w
@@ -748,6 +772,11 @@ class Bot:
         if c >= s.my_stack or not any(s.stacks.get(v, 1) > 0 for v in ranges):
             real = 1.0
         ev_call = eq * real * (P + c) - c
+        if ev_call <= 0 and 20 * c <= P:
+            # no read is sure enough to fold a pair for a twentieth of the pot
+            a, b = s.hole[0] >> 2, s.hole[1] >> 2
+            if a == b or any(x >> 2 in (a, b) for x in s.board):
+                ev_call = 1e-9
         best, best_ev = (Action("call"), ev_call) if ev_call > 0 else (Action("fold"), 0.0)
         if can_raise and not wait:
             rr = risk("p_vs_raise")

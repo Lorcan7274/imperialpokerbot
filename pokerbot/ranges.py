@@ -61,6 +61,17 @@ class Sample:
                 for v, (x, y) in zip(vals, self.combos)]
         return hit
 
+    def bigs(self, board):
+        # hands better than one pair: two pair or trips made with the hole cards, a set, a straight or more
+        hit = self._flags.get(-len(board))
+        if hit is None:
+            vals = self.board(board)[0]
+            br = [c >> 2 for c in board]
+            hit = self._flags[-len(board)] = [
+                v >= 0 and (v >> 20 >= 4 or (x >> 2 == y >> 2 and x >> 2 in br) or connects(x >> 2, y >> 2, br))
+                for v, (x, y) in zip(vals, self.combos)]
+        return hit
+
     def board(self, board):
         hit = self._boards.get(len(board))
         if hit is None:
