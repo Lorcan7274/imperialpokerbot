@@ -93,7 +93,7 @@ def _rank_value(key):
     return TOP5[mask]
 
 
-_STOP = perf_counter() + 0.4
+_STOP = perf_counter() + 1.5
 
 
 def _warm(r, left, key):

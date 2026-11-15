@@ -101,7 +101,7 @@ def _rank_value(key):
     return TOP5[mask]
 
 
-_STOP = perf_counter() + 0.4
+_STOP = perf_counter() + 1.5
 
 
 def _warm(r, left, key):
@@ -1092,6 +1092,8 @@ def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
 
 
 class Model:
+    GONE = 60
+
     def __init__(self, strength=6.0):
         self.opp = defaultdict(int)
         self.cnt = defaultdict(int)
@@ -1104,6 +1106,7 @@ class Model:
         self.badshow = defaultdict(int)
         self.tell = {}
         self.jamx = {}
+        self.quiet = {}
 
     def observe(self, events, hero, shown=None, board=None):
         seen = set()
@@ -1155,8 +1158,11 @@ class Model:
                 hot.add(p)
             elif e.act == "fold" and (p in hot or not e.big):
                 self.viol[p] += 1
+        busy = {e.player for e in events if e.act in ("call", "raise")}
         for p in seen:
             self.hands[p] += 1
+            # a bot the server plays for only checks and folds, hand after hand
+            self.quiet[p] = 0 if p in busy else self.quiet.get(p, 0) + 1
         for p, cards in (shown or {}).items():
             if p != hero and p in seen and len(cards) == 2:
                 a, b = cards[0] >> 2, cards[1] >> 2
@@ -1168,6 +1174,9 @@ class Model:
                     t = self.jamx.setdefault((p, jams[p]), [0, 0.0])
                     t[0] += 1
                     t[1] += percentile(*cards)
+
+    def gone(self, p):
+        return self.quiet.get(p, 0) >= self.GONE
 
     def is_clone(self, p):
         n = self.rtot[p]
@@ -1652,6 +1661,11 @@ class Bot:
         self._hero = s.hero
         self._bb = s.big_blind
         self.seats = len(s.players)
+        gone = self._gone(s)
+        if (gone and len(gone) == len(s.active) - 1 and s.max_raise_to > s.my_bet + s.to_call
+                and (s.to_call <= 0 or not s.board)):
+            # a bot the server plays for folds to any bet, so the smallest one takes what is in the pot
+            return self._legal(s, Action("raise", s.min_raise_to))
         try:
             a = self._postflop(s) if s.board else self._preflop(s)
         except Exception:
@@ -1678,6 +1692,12 @@ class Bot:
 
     def _learn(self, events, shown, board):
         learn_tells(self.model.tell, events, shown, board, self._hero)
+
+    def _gone(self, s):
+        gone = {v for v in s.active if v != s.hero and self.model.gone(v)}
+        if gone:
+            gone.difference_update(r.player for r in s.history if r.kind in ("call", "raise"))
+        return gone
 
     def _late(self):
         return self.deadline is not None and perf_counter() > self.deadline
@@ -2404,9 +2424,9 @@ def workload():
 class Agent:
     BANK = 8.0
     OVERHEAD = 0.0018
-    LIMIT = 0.004
-    REFERENCE = 0.0003
-    TARGET = 0.002
+    LIMIT = 0.008
+    REFERENCE = 0.0012
+    TARGET = 0.004
     CALIBRATE = True
     REPORT = False
 
@@ -2416,13 +2436,18 @@ class Agent:
         self.spent = 0.0
         self.hands = 1000
         self.bank = self.BANK
+        self.flat = False
         self.speed = 1.0
         self.heavy = self.TARGET
         self.seen = {"cal": 0.0, "clock": 0.0, "end": 0.0, "endmax": 0.0, "late": 0, "told": False,
                      False: [0, 0.0, 0.0], True: [0, 0.0, 0.0], "hist": [0] * 8}
 
+    # the time bank of a table longer than 1,000 hands: "scaled" grows with the hands, "flat" is one round's
+    FINAL = "scaled"
+
     def on_table_start(self, info):
         self.hands = info.get("hands", 1000)
+        self.flat = self.FINAL == "flat" and self.hands > 1000
         self.bank = self.BANK * max(1.0, self.hands / 1000.0)
         self.bot.seats = info.get("num_players") or 0
         if not self.CALIBRATE:
@@ -2447,17 +2472,24 @@ class Agent:
         try:
             hand = state.get("hand_number", 1)
             while hand > self.hands:
-                # more hands than the table announced: the time bank is taken to grow with them
+                # more hands than the table announced: the time bank is taken to grow with them, unless FINAL says not
                 self.hands += 1000
                 self.bank += self.BANK
+                self.flat = self.FINAL == "flat"
             per_hand = (self.bank - self.spent) / max(1, self.hands - hand + 1)
             bot.trials = (self.base_trials if per_hand > 0.004 else
                           45 if per_hand > 0.002 else 24 if per_hand > 0.0008 else 0)
+            if self.flat:
+                # one round's bank cannot last the whole table, so thinking stays at its shallowest until it is gone
+                bot.trials = 16
             # out of budget by the bot's own count: while the server still asks, it answers with the quick rules
             quick = bot.trials == 0
             bot.trials = bot.trials or 16
+            # depth falls as the spend projected from the pace so far passes 70% of the bank, to its floor at 86%
+            ahead = self.spent * self.hands / max(hand - 1, 50)
+            room = min(1.0, max(0.2, 4.5 - 5.0 * ahead / self.bank))
             # a smaller budget must not be spent back by the speed controller
-            bot.scale = min(self.speed, bot.trials / self.base_trials)
+            bot.scale = min(self.speed, bot.trials / self.base_trials, room)
             bot.deadline = (t if quick else t + self.LIMIT) if self.CALIBRATE or quick else None
             a = bot.decide(convert_state(state))
             out = {"action": a.kind}

@@ -109,5 +109,12 @@ class Station(Base):
         return self.give_up(s)
 
 
+def dying(bot, at):
+    # from hand `at` on the bot is played by the server: check when that is allowed, otherwise fold
+    alive = bot.decide
+    bot.decide = lambda s: alive(s) if s.hand_id < at else Action("fold" if s.to_call > 0 else "check")
+    return bot
+
+
 ALL = {"folder": Folder, "caller": Caller, "random": Random, "maniac": Maniac,
        "allin": AllIn, "nit": Nit, "starter": Starter, "station": Station}

@@ -6,7 +6,7 @@ import time
 
 sys.path.insert(0, ".")
 from arena.faithful import Table, normalise
-from arena.fuzz import FIELDS, load, pct
+from arena.fuzz import FIELDS, fill, load, pct
 from arena.zoo import ZOO
 
 
@@ -72,7 +72,7 @@ class Copy:
 
 def once(mod, field, players, betting, cap, hands, seed, clock):
     rng = random.Random(seed)
-    names = field.split(",")[:players - 1]
+    names = fill(field, players)
     seats = [Copy(mod, rng.random()) if k == "self" else ZOO[k](seed=rng.random()) for k in names]
     hero = Timed(mod, seed, clock)
     seats.insert(rng.randrange(players), hero)

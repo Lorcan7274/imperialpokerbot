@@ -9,14 +9,23 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from arena.engine import Table
 from arena.kitlike import House, KitSeat
-from arena.opponents import ALL
+from arena.opponents import ALL, dying
 
 BB = 20
 _MODULES = {}
 
 
+class Registry(dict):
+    def __missing__(self, key):
+        # "name@300" is that opponent, auto-played from hand 300 on
+        kind, _, at = key.rpartition("@")
+        if not kind or not at.isdigit():
+            raise KeyError(key)
+        return lambda seed=0: dying(self[kind](seed=seed), int(at))
+
+
 def registry():
-    reg = dict(ALL, house=House)
+    reg = Registry(ALL, house=House)
     for mod, attr in (("arena.realfield", "REAL"), ("arena.rivals", "RIVALS"),
                       ("arena.exploiters", "EXPLOITERS")):
         try:
@@ -61,7 +70,10 @@ def play_round(job):
             continue
         kind, i = nm.rsplit("#", 1)
         if kind.startswith("bot:"):
+            kind, at = kind.rsplit("@", 1) if kind[-1:].isdigit() and "@" in kind else (kind, "")
             bots[nm] = KitSeat(make_agent(kind[4:], seed * 100 + int(i), False), order, nm, hands)
+            if at:
+                dying(bots[nm], int(at))
         else:
             bots[nm] = reg[kind](seed=seed * 100 + int(i))
     table = Table(bots, seed=seed)
@@ -91,7 +103,8 @@ def main():
     ap.add_argument("--a", default="bot.py")
     ap.add_argument("--b", default="")
     ap.add_argument("--field", default="house,house,caller,random,starter,nit,station",
-                    help="comma list of registry names, bot:<path>, @a or @b; append *N to repeat")
+                    help="comma list of registry names, bot:<path>, @a or @b; append @H to auto-play it from hand H, "
+                         "*N to repeat")
     ap.add_argument("--rounds", type=int, default=8)
     ap.add_argument("--hands", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=1000)
@@ -105,8 +118,9 @@ def main():
     field = []
     for tok in a.field.split(","):
         tok, _, rep = tok.partition("*")
+        tok, at = tok.rsplit("@", 1) if tok[-1:].isdigit() and "@" in tok else (tok, "")
         tok = {"@a": "bot:" + a.a, "@b": "bot:" + (a.b or a.a)}.get(tok, tok)
-        field += [tok] * int(rep or 1)
+        field += [tok + "@" * bool(at) + at] * int(rep or 1)
     variants = [("A", a.a)] + ([("B", a.b)] if a.b else [])
     jobs = [(path, field, a.seed + r, a.hands, a.paced) for _, path in variants for r in range(a.rounds)]
     if a.procs > 1:

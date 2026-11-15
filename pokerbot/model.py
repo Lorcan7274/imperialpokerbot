@@ -190,6 +190,8 @@ def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
 
 
 class Model:
+    GONE = 60
+
     def __init__(self, strength=6.0):
         self.opp = defaultdict(int)
         self.cnt = defaultdict(int)
@@ -202,6 +204,7 @@ class Model:
         self.badshow = defaultdict(int)
         self.tell = {}
         self.jamx = {}
+        self.quiet = {}
 
     def observe(self, events, hero, shown=None, board=None):
         seen = set()
@@ -253,8 +256,11 @@ class Model:
                 hot.add(p)
             elif e.act == "fold" and (p in hot or not e.big):
                 self.viol[p] += 1
+        busy = {e.player for e in events if e.act in ("call", "raise")}
         for p in seen:
             self.hands[p] += 1
+            # a bot the server plays for only checks and folds, hand after hand
+            self.quiet[p] = 0 if p in busy else self.quiet.get(p, 0) + 1
         for p, cards in (shown or {}).items():
             if p != hero and p in seen and len(cards) == 2:
                 a, b = cards[0] >> 2, cards[1] >> 2
@@ -266,6 +272,9 @@ class Model:
                     t = self.jamx.setdefault((p, jams[p]), [0, 0.0])
                     t[0] += 1
                     t[1] += percentile(*cards)
+
+    def gone(self, p):
+        return self.quiet.get(p, 0) >= self.GONE
 
     def is_clone(self, p):
         n = self.rtot[p]

@@ -71,9 +71,9 @@ def workload():
 class Agent:
     BANK = 8.0
     OVERHEAD = 0.0018
-    LIMIT = 0.004
-    REFERENCE = 0.0003
-    TARGET = 0.002
+    LIMIT = 0.008
+    REFERENCE = 0.0012
+    TARGET = 0.004
     CALIBRATE = True
     REPORT = False
 
@@ -83,13 +83,18 @@ class Agent:
         self.spent = 0.0
         self.hands = 1000
         self.bank = self.BANK
+        self.flat = False
         self.speed = 1.0
         self.heavy = self.TARGET
         self.seen = {"cal": 0.0, "clock": 0.0, "end": 0.0, "endmax": 0.0, "late": 0, "told": False,
                      False: [0, 0.0, 0.0], True: [0, 0.0, 0.0], "hist": [0] * 8}
 
+    # the time bank of a table longer than 1,000 hands: "scaled" grows with the hands, "flat" is one round's
+    FINAL = "scaled"
+
     def on_table_start(self, info):
         self.hands = info.get("hands", 1000)
+        self.flat = self.FINAL == "flat" and self.hands > 1000
         self.bank = self.BANK * max(1.0, self.hands / 1000.0)
         self.bot.seats = info.get("num_players") or 0
         if not self.CALIBRATE:
@@ -114,17 +119,24 @@ class Agent:
         try:
             hand = state.get("hand_number", 1)
             while hand > self.hands:
-                # more hands than the table announced: the time bank is taken to grow with them
+                # more hands than the table announced: the time bank is taken to grow with them, unless FINAL says not
                 self.hands += 1000
                 self.bank += self.BANK
+                self.flat = self.FINAL == "flat"
             per_hand = (self.bank - self.spent) / max(1, self.hands - hand + 1)
             bot.trials = (self.base_trials if per_hand > 0.004 else
                           45 if per_hand > 0.002 else 24 if per_hand > 0.0008 else 0)
+            if self.flat:
+                # one round's bank cannot last the whole table, so thinking stays at its shallowest until it is gone
+                bot.trials = 16
             # out of budget by the bot's own count: while the server still asks, it answers with the quick rules
             quick = bot.trials == 0
             bot.trials = bot.trials or 16
+            # depth falls as the spend projected from the pace so far passes 70% of the bank, to its floor at 86%
+            ahead = self.spent * self.hands / max(hand - 1, 50)
+            room = min(1.0, max(0.2, 4.5 - 5.0 * ahead / self.bank))
             # a smaller budget must not be spent back by the speed controller
-            bot.scale = min(self.speed, bot.trials / self.base_trials)
+            bot.scale = min(self.speed, bot.trials / self.base_trials, room)
             bot.deadline = (t if quick else t + self.LIMIT) if self.CALIBRATE or quick else None
             a = bot.decide(convert_state(state))
             out = {"action": a.kind}

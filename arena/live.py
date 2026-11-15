@@ -5,7 +5,7 @@ import time
 
 sys.path.insert(0, ".")
 from arena.faithful import Table
-from arena.fuzz import FIELDS, pct
+from arena.fuzz import FIELDS, fill, pct
 from arena.proc import ProcSeat
 from arena.zoo import ZOO
 
@@ -26,7 +26,7 @@ def main():
     a = ap.parse_args()
     for r in range(a.rounds):
         rng = random.Random(a.seed + r)
-        seats = [ZOO[k](seed=rng.random()) for k in FIELDS[a.field].split(",")[:a.players - 1]]
+        seats = [ZOO[k](seed=rng.random()) for k in fill(FIELDS[a.field], a.players)]
         hero = ProcSeat(a.bot, python=a.python, timeout_ms=a.timeout, bank_ms=a.bank * 1000,
                         timing=True)
         seats.insert(rng.randrange(a.players), hero)

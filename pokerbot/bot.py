@@ -132,6 +132,11 @@ class Bot:
         self._hero = s.hero
         self._bb = s.big_blind
         self.seats = len(s.players)
+        gone = self._gone(s)
+        if (gone and len(gone) == len(s.active) - 1 and s.max_raise_to > s.my_bet + s.to_call
+                and (s.to_call <= 0 or not s.board)):
+            # a bot the server plays for folds to any bet, so the smallest one takes what is in the pot
+            return self._legal(s, Action("raise", s.min_raise_to))
         try:
             a = self._postflop(s) if s.board else self._preflop(s)
         except Exception:
@@ -158,6 +163,12 @@ class Bot:
 
     def _learn(self, events, shown, board):
         learn_tells(self.model.tell, events, shown, board, self._hero)
+
+    def _gone(self, s):
+        gone = {v for v in s.active if v != s.hero and self.model.gone(v)}
+        if gone:
+            gone.difference_update(r.player for r in s.history if r.kind in ("call", "raise"))
+        return gone
 
     def _late(self):
         return self.deadline is not None and perf_counter() > self.deadline

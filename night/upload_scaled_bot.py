@@ -2480,14 +2480,12 @@ class Agent:
             bot.trials = (self.base_trials if per_hand > 0.004 else
                           45 if per_hand > 0.002 else 24 if per_hand > 0.0008 else 0)
             if self.flat:
-                # one round's bank cannot pay for the whole table, and being auto-played costs less than playing
-                # by the quick rules: the shallowest real thinking on every decision until the server stops asking
+                # one round's bank cannot last the whole table, so thinking stays at its shallowest until it is gone
                 bot.trials = 16
             # out of budget by the bot's own count: while the server still asks, it answers with the quick rules
             quick = bot.trials == 0
             bot.trials = bot.trials or 16
-            # depth falls as the spend projected from the pace so far passes 70% of the bank, to its floor at 86%;
-            # heavy rounds start fast, so it engages early in them, and it makes the quick rules rarer, not impossible
+            # depth falls as the spend projected from the pace so far passes 70% of the bank, to its floor at 86%
             ahead = self.spent * self.hands / max(hand - 1, 50)
             room = min(1.0, max(0.2, 4.5 - 5.0 * ahead / self.bank))
             # a smaller budget must not be spent back by the speed controller

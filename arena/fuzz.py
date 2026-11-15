@@ -196,9 +196,15 @@ def pct(xs, q):
     return xs[min(len(xs) - 1, int(q * len(xs)))]
 
 
+def fill(field, players):
+    # a field shorter than the table is repeated, so a table of any size is full
+    names = field.split(",")
+    return [names[i % len(names)] for i in range(players - 1)]
+
+
 def run(mod, probe, field, players, betting, cap, hands, seed):
     rng = random.Random(seed)
-    names = field.split(",")[:players - 1]
+    names = fill(field, players)
     seats = [Copy(mod) if k == "self" else ZOO[k](seed=rng.random()) for k in names]
     hero = Hero(mod, probe, seed=seed)
     seats.insert(rng.randrange(players), hero)
