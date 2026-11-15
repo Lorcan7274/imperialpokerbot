@@ -370,9 +370,15 @@ def gap_lines(rounds, team, left, of):
         sd = (sum((d - mean) ** 2 for d in diffs) / (len(diffs) - 1)) ** 0.5
         out.append("So far we %s %.0f bb a round on them on average, give or take %.0f in any one round (%s)." % (
             "gain" if mean >= 0 else "lose", abs(mean), sd, plural(len(diffs), "round")))
-        if left:
-            out.append("Over the %d left, chance alone could move the gap by roughly %.0f bb either way." % (
-                left, sd * left ** 0.5))
+        if left and sd:
+            from statistics import NormalDist
+            spread = sd * left ** 0.5
+            signed = bb(teams[team]["c"]["net"] - teams[rival]["c"]["net"])
+            out.append("Over the %d left, chance alone moves the gap by about %.0f bb (one standard deviation): "
+                       "one time in six it moves more than that against us." % (left, spread))
+            out.append("Chance we end ahead of %s: about %.0f%% if the two bots are even from here, %.0f%% if the "
+                       "average so far continues. Other teams are not counted." % (
+                           rival, 100 * NormalDist().cdf(signed / spread), 100 * NormalDist().cdf((signed + mean * left) / spread)))
     if any(set(rd["players"]) != set(rounds[0]["players"]) for rd in rounds):
         out.append("The table changed between rounds, so teams played different rounds: not a fair ranking.")
     return out

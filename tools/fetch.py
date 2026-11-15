@@ -21,16 +21,23 @@ def sync(site, token, out):
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "_results.json"), "w") as f:
         json.dump(res, f)
-    new = []
+    new, failed = [], []
     for rd in res.get("rounds", []):
         dest = os.path.join(out, rd["ref"].replace("/", "_") + ".json")
         if os.path.exists(dest):
             continue
-        data = get(site, "/api/poker/hands?ref=" + urllib.parse.quote(rd["ref"]), token)
-        data["round"] = rd
-        with open(dest, "w") as f:
+        try:
+            data = get(site, "/api/poker/hands?ref=" + urllib.parse.quote(rd["ref"]), token)
+            data["round"] = rd
+        except (urllib.error.HTTPError, ValueError, TypeError) as e:  # one round's hands must not block the rounds after it
+            failed.append("%s: %s" % (rd["ref"], e))
+            continue
+        with open(dest + ".part", "w") as f:
             json.dump(data, f)
+        os.replace(dest + ".part", dest)
         new.append(dest)
+    if failed:
+        raise SystemExit("hands not downloaded: " + "; ".join(failed)[:300])
     return res, new
 
 
