@@ -5,6 +5,7 @@ H=${1:-hands}
 cd "$(dirname "$0")/../.." || exit 1
 mkdir -p "$H"
 ls "$H" > "$H/.seen"
+rm -f "$H/.state"
 fails=0
 while true; do
   if python3 tools/fetch.py --out "$H" >/dev/null 2>"$H/.err"; then
@@ -12,6 +13,21 @@ while true; do
   else
     fails=$((fails+1))
     if [ $fails -eq 3 ]; then echo "fetch failing: $(tail -1 "$H/.err" | cut -c1-200)"; fi
+  fi
+  state=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+c = d.get('lastCheck') or {}
+bad = [] if c.get('ok', 1) else ['the upload failed the load check']
+bad += ['team flags %s' % json.dumps(d['flags'])[:300]] if d.get('flags') else []
+print('upload: version %s, sha %s, %s%s' % (c.get('version'), c.get('sha'), ' '.join(str(c.get('message')).split())[:200],
+                                            ' | ALERT ' + ', '.join(bad) if bad else ''))" "$H/_results.json" 2>/dev/null)
+  if [ -n "$state" ] && [ "$state" != "$(cat "$H/.state" 2>/dev/null)" ]; then
+    echo "$state"
+    echo "$state" > "$H/.state"
   fi
   for f in $(ls "$H" | grep -v -x -F -f "$H/.seen" | grep "json$" | grep -v "^_" | grep -v "^saturday_" | sort); do
     line=$(python3 tools/live/report.py "$H/$f" 2>&1 | head -1)
