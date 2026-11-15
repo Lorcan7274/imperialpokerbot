@@ -4,7 +4,8 @@
 H=${1:-hands}
 cd "$(dirname "$0")/../.." || exit 1
 mkdir -p "$H"
-ls "$H" > "$H/.seen"
+# a restart keeps the list of rounds already reported, so a round fetched just before a stop is not lost
+[ -f "$H/.seen" ] || ls "$H" > "$H/.seen"
 rm -f "$H/.state" "$H/.late"
 fails=0
 behind=0
