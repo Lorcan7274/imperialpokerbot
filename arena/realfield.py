@@ -344,3 +344,12 @@ class RealWBot(SizeTell):
 REAL = {"kit_starter0": KitStarter, "kit_variant": KitVariant, "tight_a": TightIso, "tight_b": TightIsoB,
         "real_cpcf": RealCPCF, "real_gg": RealGamesGone, "real_ee": RealEE, "real_mohil": RealMohil,
         "real_wbot": RealWBot}
+try:
+    import arena.clones  # adds the stand-ins fitted from the logged rounds to REAL
+except ImportError: pass
+
+try:
+    from arena.theory import THEORY
+    REAL.update(THEORY)
+except ImportError:
+    pass
