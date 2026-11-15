@@ -1092,6 +1092,8 @@ def classify(history, bb, stack=2000, ctx=None, n=0, now=None):
 
 
 class Model:
+    GONE = 60
+
     def __init__(self, strength=6.0):
         self.opp = defaultdict(int)
         self.cnt = defaultdict(int)
@@ -1104,6 +1106,7 @@ class Model:
         self.badshow = defaultdict(int)
         self.tell = {}
         self.jamx = {}
+        self.quiet = {}
 
     def observe(self, events, hero, shown=None, board=None):
         seen = set()
@@ -1155,8 +1158,11 @@ class Model:
                 hot.add(p)
             elif e.act == "fold" and (p in hot or not e.big):
                 self.viol[p] += 1
+        busy = {e.player for e in events if e.act in ("call", "raise")}
         for p in seen:
             self.hands[p] += 1
+            # a bot the server plays for only checks and folds, hand after hand
+            self.quiet[p] = 0 if p in busy else self.quiet.get(p, 0) + 1
         for p, cards in (shown or {}).items():
             if p != hero and p in seen and len(cards) == 2:
                 a, b = cards[0] >> 2, cards[1] >> 2
@@ -1168,6 +1174,9 @@ class Model:
                     t = self.jamx.setdefault((p, jams[p]), [0, 0.0])
                     t[0] += 1
                     t[1] += percentile(*cards)
+
+    def gone(self, p):
+        return self.quiet.get(p, 0) >= self.GONE
 
     def is_clone(self, p):
         n = self.rtot[p]
@@ -1652,6 +1661,11 @@ class Bot:
         self._hero = s.hero
         self._bb = s.big_blind
         self.seats = len(s.players)
+        gone = self._gone(s)
+        if (gone and len(gone) == len(s.active) - 1 and s.max_raise_to > s.my_bet + s.to_call
+                and (s.to_call <= 0 or not s.board)):
+            # a bot the server plays for folds to any bet, so the smallest one takes what is in the pot
+            return self._legal(s, Action("raise", s.min_raise_to))
         try:
             a = self._postflop(s) if s.board else self._preflop(s)
         except Exception:
@@ -1678,6 +1692,12 @@ class Bot:
 
     def _learn(self, events, shown, board):
         learn_tells(self.model.tell, events, shown, board, self._hero)
+
+    def _gone(self, s):
+        gone = {v for v in s.active if v != s.hero and self.model.gone(v)}
+        if gone:
+            gone.difference_update(r.player for r in s.history if r.kind in ("call", "raise"))
+        return gone
 
     def _late(self):
         return self.deadline is not None and perf_counter() > self.deadline

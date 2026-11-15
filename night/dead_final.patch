@@ -1,8 +1,8 @@
 diff --git a/arena/abtest.py b/arena/abtest.py
-index 74ceb2d..134110c 100644
+index 74ceb2d..cb57b2c 100644
 --- a/arena/abtest.py
 +++ b/arena/abtest.py
-@@ -9,14 +9,21 @@ import sys
+@@ -9,14 +9,23 @@ import sys
  sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
  from arena.engine import Table
  from arena.kitlike import House, KitSeat
@@ -16,7 +16,9 @@ index 74ceb2d..134110c 100644
 +class Registry(dict):
 +    def __missing__(self, key):
 +        # "name@300" is that opponent, auto-played from hand 300 on
-+        kind, _, at = key.partition("@")
++        kind, _, at = key.rpartition("@")
++        if not kind or not at.isdigit():
++            raise KeyError(key)
 +        return lambda seed=0: dying(self[kind](seed=seed), int(at))
 +
 +
@@ -26,18 +28,18 @@ index 74ceb2d..134110c 100644
      for mod, attr in (("arena.realfield", "REAL"), ("arena.rivals", "RIVALS"),
                        ("arena.exploiters", "EXPLOITERS")):
          try:
-@@ -61,7 +68,10 @@ def play_round(job):
+@@ -61,7 +70,10 @@ def play_round(job):
              continue
          kind, i = nm.rsplit("#", 1)
          if kind.startswith("bot:"):
-+            kind, _, at = kind.partition("@")
++            kind, at = kind.rsplit("@", 1) if kind[-1:].isdigit() and "@" in kind else (kind, "")
              bots[nm] = KitSeat(make_agent(kind[4:], seed * 100 + int(i), False), order, nm, hands)
 +            if at:
 +                dying(bots[nm], int(at))
          else:
              bots[nm] = reg[kind](seed=seed * 100 + int(i))
      table = Table(bots, seed=seed)
-@@ -91,7 +101,8 @@ def main():
+@@ -91,7 +103,8 @@ def main():
      ap.add_argument("--a", default="bot.py")
      ap.add_argument("--b", default="")
      ap.add_argument("--field", default="house,house,caller,random,starter,nit,station",
@@ -47,7 +49,7 @@ index 74ceb2d..134110c 100644
      ap.add_argument("--rounds", type=int, default=8)
      ap.add_argument("--hands", type=int, default=1000)
      ap.add_argument("--seed", type=int, default=1000)
-@@ -105,8 +116,9 @@ def main():
+@@ -105,8 +118,9 @@ def main():
      field = []
      for tok in a.field.split(","):
          tok, _, rep = tok.partition("*")
@@ -76,24 +78,22 @@ index eb36112..59b1689 100644
  ALL = {"folder": Folder, "caller": Caller, "random": Random, "maniac": Maniac,
         "allin": AllIn, "nit": Nit, "starter": Starter, "station": Station}
 diff --git a/pokerbot/bot.py b/pokerbot/bot.py
-index 49e6429..67d4d3a 100644
+index 49e6429..785ca75 100644
 --- a/pokerbot/bot.py
 +++ b/pokerbot/bot.py
-@@ -132,6 +132,13 @@ class Bot:
+@@ -132,6 +132,11 @@ class Bot:
          self._hero = s.hero
          self._bb = s.big_blind
          self.seats = len(s.players)
 +        gone = self._gone(s)
-+        if len(gone) < len(s.active) - 1:
-+            if gone:
-+                s.active = [p for p in s.active if p not in gone]
-+        elif gone and s.max_raise_to > s.my_bet + s.to_call and (s.to_call <= 0 or not s.board):
++        if (gone and len(gone) == len(s.active) - 1 and s.max_raise_to > s.my_bet + s.to_call
++                and (s.to_call <= 0 or not s.board)):
 +            # a bot the server plays for folds to any bet, so the smallest one takes what is in the pot
 +            return self._legal(s, Action("raise", s.min_raise_to))
          try:
              a = self._postflop(s) if s.board else self._preflop(s)
          except Exception:
-@@ -159,6 +166,12 @@ class Bot:
+@@ -159,6 +164,12 @@ class Bot:
      def _learn(self, events, shown, board):
          learn_tells(self.model.tell, events, shown, board, self._hero)
  
@@ -106,17 +106,6 @@ index 49e6429..67d4d3a 100644
      def _late(self):
          return self.deadline is not None and perf_counter() > self.deadline
  
-@@ -549,7 +562,9 @@ class Bot:
-                 return self._raise(s, 3.5 * bb) if p < 0.40 else Action("check")
-             acted = {e.player for e in events}
-             behind = [v for v in villains if v not in acted]
--            pct = {0: 0.22, 1: 0.45, 2: 0.42, 3: 0.26, 4: 0.19, 5: 0.15, 6: 0.12}.get(len(behind), 0.10)
-+            # with a bet to call and nobody live behind, the seat is the last one before the blinds, not the big blind
-+            pct = {0: 0.22, 1: 0.45, 2: 0.42, 3: 0.26, 4: 0.19, 5: 0.15, 6: 0.12}.get(
-+                len(behind) or int(s.to_call > 0), 0.10)
-             loose = sum(1 - freq(v, "vs_raise", "fold", n) for v in villains) / max(1, len(villains))
-             steal = 1.0
-             for v in behind:
 diff --git a/pokerbot/model.py b/pokerbot/model.py
 index fb6b71e..93b9cf3 100644
 --- a/pokerbot/model.py
@@ -162,7 +151,7 @@ index fb6b71e..93b9cf3 100644
          # a starter bot that runs slowly times out and folds out of turn on about 2% of its actions
 diff --git a/tests/test_dead.py b/tests/test_dead.py
 new file mode 100644
-index 0000000..324bad7
+index 0000000..71cc331
 --- /dev/null
 +++ b/tests/test_dead.py
 @@ -0,0 +1,164 @@
@@ -255,10 +244,12 @@ index 0000000..324bad7
 +        s = self.state(woke, active=["v", "h"], pot=180, to_call=80, my_bet=40, my_stack=1960, min_raise_to=200)
 +        self.assertEqual(bot._gone(s), set())
 +        self.assertEqual(bot.decide(s), Action("fold"))
++        # with a live player still in, a flagged one changes nothing
 +        s = self.state(woke[:-1], active=["v", "w", "h"])
 +        self.assertEqual(bot._gone(s), {"w"})
-+        bot.decide(s)
-+        self.assertEqual(s.active, ["v", "h"])
++        plain = Bot(seed=1, strict=True)
++        self.assertEqual(bot.decide(s), plain.decide(self.state(woke[:-1], active=["v", "w", "h"])))
++        self.assertEqual(s.active, ["v", "w", "h"])
 +
 +    def test_smallest_bet_after_the_flop_and_only_when_nobody_has_bet(self):
 +        pre = [Rec("h", 0, "sb", 10, 10), Rec("w", 0, "bb", 20, 20), Rec("x", 0, "fold", 0, 0),
@@ -301,11 +292,9 @@ index 0000000..324bad7
 +        self.assertTrue(m.gone("d1") and m.gone("d2") and m.gone("d3"))
 +        self.assertFalse(m.gone("c1") or m.gone("r1") or m.gone("s1"))
 +        for street in range(4):
-+            self.assertTrue(any(st == street and cut for st, cut, _, _ in hero.cut), street)
-+        # a flagged player is left out unless every opponent is flagged, and nobody else ever is
-+        for _, cut, gone, others in hero.cut:
-+            self.assertEqual(cut, 0 if gone == others else gone)
-+            self.assertLess(gone, others)
++            self.assertTrue(any(st == street and gone for st, _, gone, _ in hero.cut), street)
++        # nobody is ever taken out of the hand
++        self.assertFalse(any(cut for _, cut, _, _ in hero.cut))
 +
 +    def test_no_change_where_nobody_is_flagged(self):
 +        logs = []
